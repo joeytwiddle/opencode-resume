@@ -593,7 +593,7 @@ main() {
   trap 'rm -f "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
 
   local fzf_header='Enter: resume   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping'
-  fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-F: cycle preview   CTRL-/: layout'
+  fzf_header="$fzf_header"$'\n''CTRL-S: search   CTRL-T: transcript   CTRL-E: edit   CTRL-F: cycle preview   CTRL-/: layout'
 
   while :; do
     local out
@@ -607,10 +607,10 @@ main() {
           --expect=ctrl-n \
           --header="$fzf_header" \
           --preview 'opencode-resume --preview {1}' \
-          --preview-window 'hidden,right,50%,wrap,border-left' \
-          --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
+          --preview-window 'right,50%,wrap,border-left' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
+          --bind 'ctrl-s:execute(opencode-resume --search)' \
           --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
