@@ -113,6 +113,7 @@ our_styling() {
     eval "val=\"\${$key:-}\""
     [ -n "$val" ] && eval "$var=\"\$(printf '\\033[%sm' \"\$val\")\""
   done
+  return 0
 }
 
 bat_styling() {
@@ -843,6 +844,198 @@ preview_session() {
   fi
 }
 
+# ──────────────────────────────────────────────
+# Search mode
+# ──────────────────────────────────────────────
+
+search_cache_dir() {
+  local tmpdir="${TMPDIR:-/tmp}"
+  local cache_dir="$tmpdir/opencode-resume/search-cache"
+  mkdir -p "$cache_dir" 2>/dev/null || true
+  printf '%s' "$cache_dir"
+}
+
+search_session_cache() {
+  local sid="$1"
+  local cache_dir
+  cache_dir="$(search_cache_dir)"
+
+  local plain="$cache_dir/transcript-${sid}.txt"
+  local colored="$cache_dir/transcript-${sid}.color.txt"
+
+  local db
+  db="$(get_db_path)" || return 1
+
+  local session_updated
+  session_updated="$(open_query "$db" "SELECT COALESCE(time_updated, 0) FROM session WHERE id = '$sid'")"
+
+  if [ -f "$plain" ] && [ -f "$colored" ] && [ -n "$session_updated" ]; then
+    local cache_mtime session_mtime
+    cache_mtime="$(stat -c %Y "$plain" 2>/dev/null || echo 0)"
+    session_mtime=$(( session_updated / 1000 ))
+    [ "$cache_mtime" -gt "$session_mtime" ] 2>/dev/null && { printf '%s\t%s' "$plain" "$colored"; return 0; }
+  fi
+
+  render_transcript_impl "$sid" false false false > "$colored" 2>/dev/null
+  sed 's/\x1b\[[0-9;]*m//g' "$colored" > "$plain" 2>/dev/null
+
+  printf '%s\t%s' "$plain" "$colored"
+}
+
+search_count_one() {
+  local sid="$1"
+  shift
+  [ $# -eq 0 ] && return 0
+
+  local cache_paths
+  cache_paths="$(search_session_cache "$sid")" || return 0
+  local plain colored
+  IFS=$'\t' read -r plain colored <<< "$cache_paths"
+
+  [ ! -f "$plain" ] && return 0
+
+  local terms=("$@")
+  local match_lines=0
+  local line text_lower
+
+  while IFS= read -r line; do
+    text_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+    local all_found=true
+    for term in "${terms[@]}"; do
+      case "$text_lower" in
+        *"$term"*) ;;
+        *) all_found=false; break ;;
+      esac
+    done
+    [ "$all_found" = "true" ] && match_lines=$((match_lines + 1))
+  done < "$plain"
+
+  [ "$match_lines" -gt 0 ] || return 0
+  printf '%d\t%s\n' "$match_lines" "$sid"
+}
+
+search_list() {
+  local query="$*"
+  [ -z "$query" ] && return 0
+
+  local -a terms
+  read -ra terms <<< "$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')"
+  [ "${#terms[@]}" -eq 0 ] && return 0
+
+  local db
+  db="$(get_db_path)" || return 1
+
+  local session_ids
+  session_ids="$(open_query "$db" "SELECT id FROM session ORDER BY time_updated DESC")"
+  [ -z "$session_ids" ] && return 0
+
+  local tmpdir="${TMPDIR:-/tmp}"
+  local results_file
+  results_file="$(mktemp "$tmpdir/opencode-resume-search-XXXXXX")"
+
+  printf '%s' "$session_ids" | xargs -P"$(nproc 2>/dev/null || echo 4)" -I{} "$0" --search-count {} "${terms[@]}" > "$results_file" 2>/dev/null || true
+
+  sort -t$'\t' -k1,1 -rn "$results_file" 2>/dev/null | while IFS=$'\t' read -r count sid; do
+    [ -z "$sid" ] && continue
+    local session_info slug title
+    session_info="$(open_query "$db" "SELECT COALESCE(slug, ''), COALESCE(title, '') FROM session WHERE id = '$sid'")"
+    IFS='|' read -r slug title <<< "$session_info"
+    [ -z "$title" ] && title="Untitled"
+    [ "$title" = "$slug" ] && title="Untitled"
+    printf '%s\t%s\xc3\x97\t%s\n' "$sid" "$count" "$title"
+  done
+
+  rm -f "$results_file"
+}
+
+search_preview() {
+  local sid="$1"
+  shift
+  [ -z "$sid" ] && return 0
+
+  local query="$*"
+
+  local cache_paths
+  cache_paths="$(search_session_cache "$sid")" || return 0
+  local plain colored
+  IFS=$'\t' read -r plain colored <<< "$cache_paths"
+
+  [ ! -f "$colored" ] && return 0
+
+  if [ -z "$query" ]; then
+    cat "$colored"
+    return 0
+  fi
+
+  local -a terms
+  read -ra terms <<< "$(printf '%s' "$query" | tr '[:upper:]' '[:lower:]')"
+
+  local pattern=""
+  local sep=""
+  for term in "${terms[@]}"; do
+    local escaped
+    escaped="$(printf '%s' "$term" | sed 's/[][\.*^$(){}?+|/]/\\&/g')"
+    pattern="${pattern}${sep}${escaped}"
+    sep="|"
+  done
+
+  GREP_COLOR='07' grep -i -C 2 --color=always -E "$pattern" "$colored" 2>/dev/null || true
+}
+
+main_search() {
+  check_prerequisites || return 1
+  local db
+  db="$(get_db_path)" || return 1
+  [ ! -f "$db" ] && { echo "No opencode database at $db" >&2; return 1; }
+
+  local query="${*:-}"
+
+  init_picker_state
+
+  OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-search-preview-mode-XXXXXX")"
+  export OPENCODE_RESUME_PREVIEW_MODE_FILE
+  echo "full" > "$OPENCODE_RESUME_PREVIEW_MODE_FILE" 2>/dev/null || true
+
+  trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
+
+  local fzf_header='Enter: resume   DEL: delete   CTRL-R: rename   CTRL-F: toggle preview'
+  fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-C: exit'
+
+  while :; do
+    local out
+    if ! out="$(
+      fzf --ansi \
+          --disabled \
+          --with-nth=2.. \
+          --delimiter=$'\t' \
+          --no-sort \
+          --query="$query" \
+          --header="$fzf_header" \
+          --preview 'opencode-resume --search-preview {1} {q}' \
+          --preview-window 'right,50%,wrap,border-left' \
+          --bind 'start:reload:opencode-resume --search-list+change:reload:opencode-resume --search-list {q}' \
+          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)' \
+          --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
+          --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
+          --bind 'enter:accept-non-empty' \
+          --bind 'del:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
+          --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
+          < /dev/null
+    )"; then
+      return 0
+    fi
+
+    parse_fzf_result "$out"
+    local session_ids=("${CR_FZF_SESSION_IDS[@]+"${CR_FZF_SESSION_IDS[@]}"}")
+    [ "${#session_ids[@]}" -eq 0 ] && return 0
+
+    local target="${session_ids[${#session_ids[@]} - 1]}"
+    rm -f "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
+    resume_session "$db" "$target"
+    break
+  done
+}
+
 resume_session() {
   local db="$1" sid="$2"
   local directory title
@@ -991,7 +1184,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     -t|--transcript)       set_mode_action transcript ;;
     -e|--edit)             set_mode_action edit ;;
-    -S|--search)           echo "opencode-resume: search mode deferred to milestone 3" >&2; exit 2 ;;
+    -S|--search)           set_mode_action search ;;
+    --search-list)         set_mode_action search-list ;;
+    --search-preview)      set_mode_action search-preview ;;
+    --search-count)        set_mode_action search-count ;;
     -a|--all-transcripts)  set_mode_action all-transcripts ;;
     --preview)             set_mode_action preview ;;
     --short)               export OPENCODE_RESUME_TRANSCRIPT_SHORT=1 ;;
@@ -1021,9 +1217,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ -z "${FORCE_COLOR:-}" ] && [ -t 1 ]; then
-  export FORCE_COLOR=1
-fi
+export FORCE_COLOR="${FORCE_COLOR:-1}"
 want_color() { [ -n "${FORCE_COLOR:-}" ] && [ "$FORCE_COLOR" != "0" ]; }
 init_colors
 
@@ -1060,5 +1254,11 @@ case "$mode_action" in
     preview_mode_spec ;;
   print-preview-mode)
     preview_mode_spec ;;
+  search)           main_search "${positional[@]}" ;;
+  search-list)      search_list "${positional[@]}" ;;
+  search-preview)   search_preview "${positional[@]}" ;;
+  search-count)
+    [ "${#positional[@]}" -lt 2 ] && { echo "opencode-resume: --search-count needs a session id and terms" >&2; exit 2; }
+    search_count_one "${positional[@]}" ;;
   "") main "${positional[@]}" ;;
 esac
