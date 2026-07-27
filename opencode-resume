@@ -1,0 +1,630 @@
+#!/usr/bin/env bash
+# vim: filetype=sh ts=2 sw=2 expandtab
+#
+# opencode-resume — an fzf picker for opencode sessions from any folder.
+#
+# Browse your recent opencode sessions in a fuzzy-searchable list, preview the
+# session metadata, then hit Enter to resume one with `opencode -s <id>`. You
+# can also rename or delete sessions inline.
+#
+# Usage: opencode-resume [flags] [mode] [search query]
+#
+# MODES
+#   (default)                  Open the interactive fzf picker — browse,
+#                              preview, resume, rename, and delete sessions
+#   -l, --list                 Just print the list of sessions
+#   -r, --resume <id|name>     Resume directly by sid or exact title
+#
+# WHICH SESSIONS TO LIST
+#   --recent (default)         Most recent sessions across every folder, flat
+#   -d, --here, --this         Only sessions for the current folder
+#   -g, --group, --both        "This folder" sessions first, "Recent" after
+#   --max-sessions N           Cap to N newest sessions (default 300)
+#   --max-age-days N           Drop sessions older than N days (default 90)
+#
+# RESUME OPTIONS
+#   --no-tmux-rename           Don't rename the tmux window to the session title
+#
+# CONFIG FILE
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-resume/config
+#   Sourced bash file. Put env var overrides there.
+#
+# EXAMPLES
+#   opencode-resume              # most-recent across all folders
+#   opencode-resume --this       # only this folder
+#   opencode-resume --both       # grouped listing
+#   opencode-resume -l           # plain list
+#   opencode-resume -r ses_xxx   # resume directly
+
+set -euo pipefail
+
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/opencode-resume/config"
+if [ -f "$config_file" ]; then
+  source "$config_file"
+fi
+unset config_file
+
+OPENCODE_DB="${OPENCODE_DB:-}"
+MAX_SESSIONS="${OPENCODE_RESUME_MAX_SESSIONS:-300}"
+MAX_AGE="${OPENCODE_RESUME_MAX_AGE-90}"
+
+ellipsis=$'\u2026'
+bullet=$'  \u2022  '
+
+init_picker_state() {
+  OPENCODE_RESUME_PREVIEW_LAYOUT_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-layout-XXXXXX")"
+  export OPENCODE_RESUME_LIST_WITH_SID=1
+  export FORCE_COLOR="${FORCE_COLOR:-1}"
+  if [ -n "${1:-}" ]; then
+    OPENCODE_RESUME_GROUP_TOGGLE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-group-XXXXXX")"
+    export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE OPENCODE_RESUME_GROUP_TOGGLE
+    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}"' EXIT
+  else
+    export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE
+    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}"' EXIT
+  fi
+}
+
+parse_fzf_result() {
+  local out="$1"
+  CR_FZF_KEY="$(printf '%s\n' "$out" | sed -n '1p')"
+  CR_FZF_SESSION_IDS=()
+  local line sid
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    sid="$(printf '%s' "$line" | cut -f1)"
+    [ -n "$sid" ] && CR_FZF_SESSION_IDS+=("$sid")
+  done < <(printf '%s\n' "$out" | tail -n +2)
+
+  if [ "$CR_FZF_KEY" = "ctrl-n" ]; then
+    rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}"
+    unset OPENCODE_RESUME_PREVIEW_LAYOUT_FILE OPENCODE_RESUME_GROUP_TOGGLE \
+          OPENCODE_RESUME_LIST_WITH_SID
+    exec opencode
+  fi
+}
+
+color_reset=''  color_bold=''  color_unbold=''  color_dim=''  color_el=''
+color_cyan=''   color_green=''  color_green_bold=''  color_blue_bold=''  color_yellow_bold=''
+color_red=''    color_red_bold=''  color_white_bold=''  color_meta=''
+
+init_colors() {
+  { want_color && our_styling; } || return 0
+  color_reset=$'\033[0m'
+  color_bold=$'\033[1m'
+  color_unbold=$'\033[22m'
+  color_dim=$'\033[2m'
+  color_el=$'\033[K'
+  color_cyan=$'\033[36m'
+  color_green=$'\033[32m'
+  color_green_bold=$'\033[1;32m'
+  color_blue_bold=$'\033[1;34m'
+  color_yellow_bold=$'\033[1;33m'
+  color_red=$'\033[31m'
+  color_red_bold=$'\033[1;31m'
+  color_white_bold=$'\033[1;37m'
+  color_meta="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_META:-38;5;250}")"
+}
+
+our_styling() { return 0; }
+
+get_db_path() {
+  if [ -z "$OPENCODE_DB" ]; then
+    OPENCODE_DB="$(opencode db path 2>/dev/null)" || {
+      echo "opencode-resume: cannot find opencode database" >&2
+      return 1
+    }
+  fi
+  printf '%s' "$OPENCODE_DB"
+}
+
+open_query() {
+  local db="$1" query="$2"
+  sqlite3 "$db" "$query" 2>/dev/null
+}
+
+preview_layout_spec() {
+  case "$1" in
+    bottom) echo "bottom,50%,wrap,border-top" ;;
+    hidden) echo "hidden" ;;
+    *)      echo "right,50%,wrap,border-left" ;;
+  esac
+}
+
+main() {
+  check_prerequisites || return 1
+  local db
+  db="$(get_db_path)" || return 1
+  [ ! -f "$db" ] && { echo "No opencode database at $db" >&2; return 1; }
+
+  local cwd query
+  cwd="$(pwd -P)"
+  query="${*:-}"
+
+  init_picker_state with-group
+
+  local fzf_header='Enter: resume   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping'
+  fzf_header="$fzf_header"$'\n''CTRL-/: cycle layout'
+
+  while :; do
+    local out
+    if ! out="$(
+      fzf --ansi \
+          --with-nth=2.. \
+          --delimiter=$'\t' \
+          --no-sort \
+          --multi \
+          --query="$query" \
+          --expect=ctrl-n \
+          --header="$fzf_header" \
+          --preview 'opencode-resume --preview {1}' \
+          --preview-window 'hidden,right,50%,wrap,border-left' \
+          --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
+          --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
+          --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
+          --bind 'pgup:preview-half-page-up,pgdn:preview-half-page-down' \
+          --bind 'enter:accept-non-empty' \
+          --bind 'del:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
+          --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
+          < <(stream_list "$db" "$cwd")
+    )"; then
+      return 0
+    fi
+
+    parse_fzf_result "$out"
+    local session_ids=("${CR_FZF_SESSION_IDS[@]+"${CR_FZF_SESSION_IDS[@]}"}")
+    [ "${#session_ids[@]}" -eq 0 ] && return 0
+
+    local target="${session_ids[${#session_ids[@]} - 1]}"
+    rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE"
+    resume_session "$db" "$target"
+    break
+  done
+}
+
+# Format: pipe-separated (|) output so text fields can't break alignment.
+# Each line: id|slug|title|directory|agent|model|time_created|time_updated|msg_count|first_prompt
+stream_list() {
+  local db="$1" cwd="$2"
+  local mode="${OPENCODE_RESUME_MODE}"
+  [ -f "${OPENCODE_RESUME_GROUP_TOGGLE:-/nonexistent}" ] && mode="both"
+
+  local cutoff=0
+  [ -n "$MAX_AGE" ] && [ "$MAX_AGE" -gt 0 ] 2>/dev/null && cutoff="$(cutoff_timestamp "$MAX_AGE")"
+
+  local now
+  now="$(date +%s)"
+
+  local query="SELECT s.id, s.slug, COALESCE(s.title, ''), COALESCE(s.directory, ''), COALESCE(s.agent, ''), COALESCE(s.model, ''),
+                      COALESCE(s.time_created, 0), COALESCE(s.time_updated, 0),
+                      (SELECT COUNT(*) FROM message WHERE session_id = s.id),
+                      COALESCE((SELECT REPLACE(REPLACE(CAST(json_extract(p.data, '$.text') AS TEXT), CHAR(9), ' '), CHAR(10), ' ')
+                                FROM message sm
+                                JOIN part p ON p.message_id = sm.id
+                                WHERE sm.session_id = s.id
+                                  AND json_extract(sm.data, '$.role') = 'user'
+                                  AND json_extract(p.data, '$.type') = 'text'
+                                  AND json_extract(p.data, '$.text') IS NOT NULL
+                                  AND CAST(json_extract(p.data, '$.text') AS TEXT) != ''
+                                ORDER BY sm.time_created, p.time_created LIMIT 1), '')
+               FROM session s
+               ORDER BY s.time_updated DESC"
+
+  local sessions
+  sessions="$(open_query "$db" "$query")"
+
+  [ -z "$sessions" ] && return 0
+
+  local line_count=0
+
+  if [ "$mode" = "this" ]; then
+    while IFS='|' read -r id slug title directory agent model time_created time_updated msg_count first_prompt; do
+      [ -z "$id" ] && continue
+      [ "$directory" != "$cwd" ] && continue
+      [ "${time_updated:-0}" -lt "$cutoff" ] 2>/dev/null && continue
+      line_count=$((line_count + 1))
+      [ "$line_count" -gt "$MAX_SESSIONS" ] && break
+      emit_row "$id" "$title" "$directory" "$agent" "$time_created" "$time_updated" "$msg_count" "$first_prompt" "$now" "$cwd" "" false
+    done <<< "$sessions"
+    return 0
+  fi
+
+  if [ "$mode" = "both" ]; then
+    local cwd_rows="" other_rows=""
+    while IFS='|' read -r id slug title directory agent model time_created time_updated msg_count first_prompt; do
+      [ -z "$id" ] && continue
+      [ "${time_updated:-0}" -lt "$cutoff" ] 2>/dev/null && continue
+      line_count=$((line_count + 1))
+      [ "$line_count" -gt "$MAX_SESSIONS" ] && break
+      local row
+      row="$(emit_row "$id" "$title" "$directory" "$agent" "$time_created" "$time_updated" "$msg_count" "$first_prompt" "$now" "$cwd" "" true)"
+      if [ "$directory" = "$cwd" ]; then
+        cwd_rows="${cwd_rows}${row}"$'\n'
+      else
+        other_rows="${other_rows}${row}"$'\n'
+      fi
+    done <<< "$sessions"
+    if [ -n "$cwd_rows" ]; then
+      printf '\t%s-- This folder --%s\n' "$color_white_bold" "$color_reset"
+      printf '%s' "$cwd_rows"
+    fi
+    if [ -n "$other_rows" ]; then
+      printf '\t%s-- Recent --%s\n' "$color_white_bold" "$color_reset"
+      printf '%s' "$other_rows"
+    fi
+    return 0
+  fi
+
+  while IFS='|' read -r id slug title directory agent model time_created time_updated msg_count first_prompt; do
+    [ -z "$id" ] && continue
+    [ "${time_updated:-0}" -lt "$cutoff" ] 2>/dev/null && continue
+    line_count=$((line_count + 1))
+    [ "$line_count" -gt "$MAX_SESSIONS" ] && break
+    emit_row "$id" "$title" "$directory" "$agent" "$time_created" "$time_updated" "$msg_count" "$first_prompt" "$now" "$cwd" "$model" false
+  done <<< "$sessions"
+}
+
+# Echoes a tab-separated row: <sid>\t<display>. When return_row_only is true,
+# the row is echoed (no prefix) instead of printed.
+emit_row() {
+  local id="$1" title="$2" directory="$3" agent="$4"
+  local time_created="$5" time_updated="$6"
+  local msg_count="$7" first_prompt="$8"
+  local now="$9" cwd="${10}" model="${11}" return_row_only="${12:-false}"
+
+  [ "$mode" = "this" ] && [ "$directory" != "$cwd" ] && { [ "$return_row_only" = "true" ] && echo "" || return 0; }
+  # Re-read mode since emit_row is called from stream_list context
+  local mode="${OPENCODE_RESUME_MODE}"
+  [ -f "${OPENCODE_RESUME_GROUP_TOGGLE:-/nonexistent}" ] && mode="both"
+
+  local folder_seq="$color_green"
+  [ "$directory" = "$cwd" ] && folder_seq="$color_green_bold"
+
+  time_created="${time_created:-0}"
+  time_updated="${time_updated:-0}"
+  msg_count="${msg_count:-0}"
+
+  local age_seconds=0 age_since_first=0
+  [ "$time_updated" -gt 0 ] && age_seconds=$(( (now * 1000 - time_updated) / 1000 ))
+  [ "$age_seconds" -lt 0 ] && age_seconds=0
+  [ "$time_created" -gt 0 ] && age_since_first=$(( (now * 1000 - time_created) / 1000 ))
+  [ "$age_since_first" -lt 0 ] && age_since_first=0
+
+  local age
+  if [ "$time_created" -gt 0 ]; then
+    age="$(format_age "$age_seconds") ago ($(format_age "$age_since_first"))"
+  else
+    age="$(format_age "$age_seconds") ago"
+  fi
+
+  local short="$directory"
+  if [ -z "$short" ]; then
+    short="/"
+  elif [ -n "$HOME" ] && [ "${short#$HOME/}" != "$short" ]; then
+    short="~/${short#$HOME/}"
+  elif [ "$short" = "$HOME" ]; then
+    short="~"
+  fi
+  if [ "${#short}" -gt 23 ]; then
+    short="$(printf '%s' "$ellipsis")${short: -22}"
+  fi
+  short="$short/"
+
+  local label
+  if [ -n "$title" ]; then
+    label="${color_yellow_bold}${title}${color_reset}"
+    if [ -n "$first_prompt" ]; then
+      label="${label} ${first_prompt:0:200}"
+    fi
+  elif [ -n "$first_prompt" ]; then
+    label="${first_prompt:0:200}"
+  else
+    label="${color_red_bold}[empty session - safe to delete]${color_reset}"
+  fi
+
+  if [ "${#label}" -gt 200 ]; then
+    label="${label:0:200}"
+  fi
+
+  local prefix=""
+  [ -n "${OPENCODE_RESUME_LIST_WITH_SID:-}" ] && prefix="$id"$'\t'
+
+  local dsp_msg
+  [ "$msg_count" -gt 0 ] && dsp_msg="$(printf '%4d msgs' "$msg_count")" || dsp_msg="  0 msgs"
+
+  local row
+  row="$(printf '%s%s%-15s%s  %s%-24s%s  %s%s%s  %s' \
+    "$prefix" "$color_cyan" "$age" "$color_reset" \
+    "$folder_seq" "$short" "$color_reset" \
+    "$color_blue_bold" "$dsp_msg" "$color_reset" "$label")"
+
+  if [ "$return_row_only" = "true" ]; then
+    printf '%s' "$row"
+  else
+    printf '%s\n' "$row"
+  fi
+}
+
+format_age() {
+  local diff=$1
+  if   [ "$diff" -lt 60 ];      then printf '%2ds'  "$diff"
+  elif [ "$diff" -lt 3600 ];    then printf '%2dm'  $((diff / 60))
+  elif [ "$diff" -lt 86400 ];   then printf '%2dh'  $((diff / 3600))
+  elif [ "$diff" -lt 604800 ];  then printf '%2dd'  $((diff / 86400))
+  elif [ "$diff" -lt 2592000 ]; then printf '%2dw'  $((diff / 604800))
+  else                               printf '%2dmo' $((diff / 2592000))
+  fi
+}
+
+cutoff_timestamp() {
+  local days="$1"
+  case "$days" in ""|0|*[!0-9]*) echo 0; return ;; esac
+  local cutoff
+  cutoff="$(date -d "$days days ago" +%s 2>/dev/null)"
+  if [ -z "$cutoff" ]; then
+    cutoff="$(date -v "-${days}d" +%s 2>/dev/null)" || cutoff=0
+  fi
+  echo "$((cutoff * 1000))"
+}
+
+preview_session() {
+  local sid="$1"
+  [ -z "$sid" ] && return 0
+
+  local db
+  db="$(get_db_path)" || return 1
+
+  local data
+  data="$(open_query "$db" "
+    SELECT COALESCE(s.id, ''), COALESCE(s.slug, ''), COALESCE(s.title, ''), COALESCE(s.directory, ''),
+           COALESCE(s.agent, ''), COALESCE(s.model, ''),
+           COALESCE(s.time_created, 0), COALESCE(s.time_updated, 0),
+           COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), COALESCE(s.summary_files, 0),
+           COALESCE(s.version, ''), COALESCE(s.parent_id, ''),
+           (SELECT COUNT(*) FROM message WHERE session_id = s.id),
+           (SELECT COUNT(*) FROM message WHERE session_id = s.id AND json_extract(data, '$.role') = 'user')
+    FROM session s WHERE s.id = '$sid'
+  ")"
+  [ -z "$data" ] && return 0
+
+  local id slug title directory agent model time_created time_updated
+  local summary_additions summary_deletions summary_files version parent_id msg_count user_msg_count
+  IFS='|' read -r id slug title directory agent model time_created time_updated \
+                         summary_additions summary_deletions summary_files version parent_id \
+                         msg_count user_msg_count <<< "$data"
+
+  local bold="${color_reset}${color_bold}"
+
+  printf '%s# Session: %s (%s)%s\n\n' "$bold" "$id" "$slug" "$color_reset"
+
+  if [ -n "$title" ] && [ "$title" != "$slug" ]; then
+    printf '%sTitle:%s   %s%s\n' "$bold" "$color_unbold" "$title" "$color_reset"
+  fi
+  printf '%sSession:%s %s%s\n' "$bold" "$color_unbold" "$id" "$color_reset"
+  printf '%sSlug:%s    %s%s\n' "$bold" "$color_unbold" "$slug" "$color_reset"
+  [ -n "$parent_id" ] && printf '%sFork of:%s %s%s\n' "$bold" "$color_unbold" "$parent_id" "$color_reset"
+  printf '%sDirectory:%s %s%s\n' "$bold" "$color_unbold" "$directory" "$color_reset"
+  printf '%sAgent:%s    %s%s\n' "$bold" "$color_unbold" "$agent" "$color_reset"
+
+  local model_name="?"
+  [ -n "$model" ] && model_name="$(printf '%s' "$model" | sed 's/.*"id":"//; s/".*//')"
+  printf '%sModel:%s    %s%s\n' "$bold" "$color_unbold" "$model_name" "$color_reset"
+  [ -n "$version" ] && printf '%sVersion:%s  %s%s\n' "$bold" "$color_unbold" "$version" "$color_reset"
+
+  local created_human="" updated_human=""
+  [ "${time_created:-0}" -gt 0 ] && created_human="$(date -d "@$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
+  [ "${time_updated:-0}" -gt 0 ] && updated_human="$(date -d "@$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
+  [ -n "$created_human" ] && printf '%sCreated:%s %s%s\n' "$bold" "$color_unbold" "$created_human" "$color_reset"
+  [ -n "$updated_human" ] && printf '%sUpdated:%s %s%s\n' "$bold" "$color_unbold" "$updated_human" "$color_reset"
+
+  local file_summary=""
+  [ "${summary_files:-0}" -gt 0 ] || [ "${summary_additions:-0}" -gt 0 ] || [ "${summary_deletions:-0}" -gt 0 ] && \
+    file_summary="${summary_files} files, +${summary_additions}/-${summary_deletions}"
+
+  printf '%sMessages:%s %d total, %d user%s\n' "$bold" "$color_unbold" "${msg_count:-0}" "${user_msg_count:-0}" "$color_reset"
+  [ -n "$file_summary" ] && printf '%sChanges:%s  %s%s\n' "$bold" "$color_unbold" "$file_summary" "$color_reset"
+
+  printf '\n%s-- Session metadata (transcript view coming in milestone 2) --%s\n' "$color_dim" "$color_reset"
+}
+
+resume_session() {
+  local db="$1" sid="$2"
+  local directory title
+
+  directory="$(open_query "$db" "SELECT COALESCE(directory, '') FROM session WHERE id = '$sid'")" || directory=""
+  title="$(open_query "$db" "SELECT COALESCE(title, '') FROM session WHERE id = '$sid'")" || title=""
+
+  local cwd
+  cwd="$(pwd -P)"
+  if [ -n "$directory" ] && [ -d "$directory" ] && [ "$directory" != "$cwd" ]; then
+    printf '+ cd %s\n' "$directory" >&2
+    cd "$directory" || return 1
+  fi
+
+  if [ -n "${TMUX:-}" ] && [ -z "${OPENCODE_RESUME_NO_TMUX_RENAME:-}" ] && [ -n "$title" ]; then
+    old_tmux_window_title="$(tmux display-message -p '#W' 2>/dev/null)"
+    tmux rename-window "$(printf '%b' '\U0001f980') ${title}" 2>/dev/null
+    trap 'tmux rename-window "$old_tmux_window_title" 2>/dev/null' EXIT
+  fi
+
+  printf '+ opencode -s %s\n' "$sid" >&2
+  env -u OPENCODE_RESUME_PREVIEW_LAYOUT_FILE \
+      -u OPENCODE_RESUME_GROUP_TOGGLE \
+      -u OPENCODE_RESUME_LIST_WITH_SID \
+      opencode -s "$sid"
+}
+
+rename_session() {
+  local sid="$1"
+  local db
+  db="$(get_db_path)" || return 1
+
+  local current
+  current="$(open_query "$db" "SELECT COALESCE(title, '') FROM session WHERE id = '$sid'")"
+
+  printf '\nRename session %s\n' "$sid" >&2
+  [ -n "$current" ] && printf '  current title: %s\n' "$current" >&2
+  printf 'New title (empty = cancel): ' >&2
+  local title
+  IFS= read -r title </dev/tty || title=""
+  [ -z "$title" ] && { echo "Cancelled." >&2; return 0; }
+
+  local escaped
+  escaped="$(printf '%s' "$title" | sed "s/'/''/g")"
+  local now_ms
+  now_ms="$(date +%s)000"
+
+  sqlite3 "$db" "UPDATE session SET title = '$escaped', time_updated = $now_ms WHERE id = '$sid'" 2>/dev/null || {
+    echo "Failed to rename session." >&2; return 1
+  }
+
+  printf '%sRenamed to: %s%s\n' "$color_yellow_bold" "$title" "$color_reset" >&2
+  sleep 1
+}
+
+delete_sessions() {
+  local files=()
+  local db
+  db="$(get_db_path)" || return 1
+
+  printf '\nDelete the following session(s)?\n' >&2
+  for sid in "$@"; do
+    [ -z "$sid" ] && continue
+    local title
+    title="$(open_query "$db" "SELECT COALESCE(title, '') FROM session WHERE id = '$sid'")" || title=""
+    printf '%s %s %s\n' "$(printf '%b' "$bullet")" "$sid" "$title" >&2
+    files+=("$sid")
+  done
+
+  [ "${#files[@]}" -eq 0 ] && { echo "Nothing to delete." >&2; return 0; }
+
+  [ "${#files[@]}" -gt 1 ] && printf '  %s(%d sessions)%s\n' "$color_bold" "${#files[@]}" "$color_reset" >&2
+  printf 'Confirm delete? [Y/n]: ' >&2
+  local reply
+  IFS= read -r reply </dev/tty || reply=""
+  case "$reply" in
+    ""|y|Y|yes|YES)
+      for f in "${files[@]}"; do
+        opencode session delete "$f" 2>/dev/null || true
+      done
+      printf '%sDeleted %d session(s).%s\n' "$color_green" "${#files[@]}" "$color_reset" >&2
+      sleep 1
+      ;;
+    *) echo "Cancelled." >&2 ;;
+  esac
+}
+
+resume_by_query() {
+  local query="$1"
+  local db sid
+  db="$(get_db_path)" || return 1
+
+  sid="$(open_query "$db" "SELECT id FROM session WHERE id = '$query'")"
+  [ -n "$sid" ] && { resume_session "$db" "$sid"; return; }
+
+  sid="$(open_query "$db" "SELECT id FROM session WHERE title = '$query' LIMIT 1")"
+  [ -n "$sid" ] && { resume_session "$db" "$sid"; return; }
+
+  sid="$(OPENCODE_RESUME_LIST_WITH_SID=1 stream_list "$db" "$(pwd -P)" | sed 's/^[[:space:]]*//' | grep -i -F -- "$query" | head -1 | cut -f1)"
+  [ -n "$sid" ] && { resume_session "$db" "$sid"; return; }
+
+  echo "opencode-resume: no session matching '$query'" >&2
+  return 1
+}
+
+check_prerequisites() {
+  local missing=()
+  command -v fzf     >/dev/null 2>&1 || missing+=("fzf")
+  command -v sqlite3 >/dev/null 2>&1 || missing+=("sqlite3")
+  command -v opencode >/dev/null 2>&1 || missing+=("opencode")
+
+  [ "${#missing[@]}" -eq 0 ] && return 0
+
+  printf 'opencode-resume: missing prerequisite(s): %s\n\n' "${missing[*]}" >&2
+  for tool in "${missing[@]}"; do
+    case "$tool" in
+      fzf)     printf '  \u2022 fzf:      brew install fzf\n' >&2 ;;
+      sqlite3) printf '  \u2022 sqlite3:  brew install sqlite3\n' >&2 ;;
+      opencode) printf '  \u2022 opencode:  https://opencode.ai\n' >&2 ;;
+    esac
+  done
+  return 1
+}
+
+OPENCODE_RESUME_MODE="${OPENCODE_RESUME_MODE:-recent}"
+export OPENCODE_RESUME_MODE
+positional=()
+mode_action=""
+
+set_mode_action() {
+  if [ -n "$mode_action" ] && [ "$mode_action" != "$1" ]; then
+    echo "opencode-resume: conflicting modes: --$mode_action and --$1" >&2
+    exit 2
+  fi
+  mode_action="$1"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -[a-zA-Z0-9][a-zA-Z0-9]*)
+      bundle="${1:1}"; shift
+      exploded=()
+      for ((i=0; i<${#bundle}; i++)); do exploded+=("-${bundle:$i:1}"); done
+      set -- "${exploded[@]}" "$@"
+      continue
+      ;;
+    -t|--transcript)       echo "opencode-resume: transcript mode deferred to milestone 2" >&2; exit 2 ;;
+    -e|--edit)             echo "opencode-resume: edit mode deferred to milestone 2" >&2; exit 2 ;;
+    -S|--search)           echo "opencode-resume: search mode deferred to milestone 3" >&2; exit 2 ;;
+    -a|--all-transcripts)  echo "opencode-resume: all-transcripts deferred to milestone 2" >&2; exit 2 ;;
+    --preview)             set_mode_action preview ;;
+    -r|--resume)           set_mode_action resume ;;
+    -l|--list)             set_mode_action list ;;
+    --delete-marked)       set_mode_action delete-marked ;;
+    --rename-session)      set_mode_action rename-session ;;
+    --cycle-preview-layout) set_mode_action cycle-preview-layout ;;
+    --print-preview-layout) set_mode_action print-preview-layout ;;
+    -h|--help)
+      sed -nE '/opencode-resume/,/^$/ { /^$/q; s/^# ?//; p; }' "$0"
+      exit 0 ;;
+    -d|--here|--this)      export OPENCODE_RESUME_MODE="this" ;;
+    -g|--group|--both)     export OPENCODE_RESUME_MODE="both" ;;
+    --recent)              export OPENCODE_RESUME_MODE="recent" ;;
+    --max-sessions)        MAX_SESSIONS="${2:-}"; shift ;;
+    --max-sessions=*)      MAX_SESSIONS="${1#*=}" ;;
+    --max-age-days)        MAX_AGE="${2:-}"; shift ;;
+    --max-age-days=*)      MAX_AGE="${1#*=}" ;;
+    --no-tmux-rename)      export OPENCODE_RESUME_NO_TMUX_RENAME=1 ;;
+    *) positional+=("$1") ;;
+  esac
+  shift
+done
+
+if [ -z "${FORCE_COLOR:-}" ] && [ -t 1 ]; then
+  export FORCE_COLOR=1
+fi
+want_color() { [ -n "${FORCE_COLOR:-}" ] && [ "$FORCE_COLOR" != "0" ]; }
+init_colors
+
+case "$mode_action" in
+  preview)      preview_session "${positional[0]:-}" ;;
+  resume)
+    [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --resume needs an id or title" >&2; exit 2; }
+    resume_by_query "${positional[0]}" ;;
+  list)
+    db="$(get_db_path)" || exit 1
+    stream_list "$db" "$(pwd -P)" ;;
+  delete-marked) delete_sessions "${positional[@]}" ;;
+  rename-session) rename_session "${positional[0]:-}" ;;
+  cycle-preview-layout)
+    f="${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}"
+    case "$(cat "$f" 2>/dev/null)" in
+      bottom) echo hidden > "$f" ;;
+      hidden) echo right  > "$f" ;;
+      *)      echo bottom > "$f" ;;
+    esac
+    preview_layout_spec "$(cat "$f" 2>/dev/null)" ;;
+  print-preview-layout)
+    preview_layout_spec "$(cat "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}" 2>/dev/null)" ;;
+  "") main "${positional[@]}" ;;
+esac
