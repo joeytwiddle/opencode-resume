@@ -106,7 +106,449 @@ init_colors() {
   color_meta="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_META:-38;5;250}")"
 }
 
-our_styling() { return 0; }
+our_styling() {
+  local var key val
+  for var in color_cyan color_green color_green_bold color_blue_bold color_yellow_bold color_red color_red_bold color_white_bold color_dim color_meta; do
+    key="OPENCODE_RESUME_STYLE_$(printf '%s' "$var" | tr '[:lower:]' '[:upper:]')"
+    eval "val=\"\${$key:-}\""
+    [ -n "$val" ] && eval "$var=\"\$(printf '\\033[%sm' \"\$val\")\""
+  done
+}
+
+bat_styling() {
+  printf '%s' "-l markdown --style=plain --color=always"
+}
+
+render() {
+  if command -v bat >/dev/null 2>&1; then
+    bat -l markdown --style=plain --color=always
+  else
+    cat
+  fi
+}
+
+# Session ID validation — prevent SQL injection
+validate_sid() {
+  local sid="$1"
+  [[ "$sid" =~ ^ses_[a-zA-Z0-9_]+$ ]] && return 0
+  return 1
+}
+
+# Preview mode file: stores the current transcript preview mode
+preview_mode_file() {
+  local f="${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"
+  if [ -z "$f" ]; then
+    echo "conversation"
+    return 0
+  fi
+  if [ "${1:-}" = "cycle" ]; then
+    case "$(cat "$f" 2>/dev/null)" in
+      short)       echo conversation > "$f" ;;
+      conversation) echo full > "$f" ;;
+      *)           echo short > "$f" ;;
+    esac
+  fi
+  cat "$f" 2>/dev/null || echo "conversation"
+}
+
+# Preview mode spec: which preview modes exist and default
+preview_mode_spec() {
+  case "$(preview_mode_file)" in
+    short)       echo "short transcript" ;;
+    conversation) echo "conversation" ;;
+    full)        echo "full transcript" ;;
+  esac
+}
+
+# Session transcript cache — renders to $TMPDIR/opencode-resume/preview-cache/
+# with lazy invalidation (only re-renders when source data is newer).
+session_transcript_cache() {
+  local sid="$1" short="${2:-false}" full="${3:-false}" timestamps="${4:-false}"
+  local tmpdir="${TMPDIR:-/tmp}"
+  local cache_dir="$tmpdir/opencode-resume/preview-cache"
+  mkdir -p "$cache_dir" 2>/dev/null || true
+
+  local mode_tag="conv"
+  [ "$short" = "true" ] && mode_tag="short"
+  [ "$full" = "true" ] && mode_tag="full"
+  [ "$timestamps" = "true" ] && mode_tag="${mode_tag}_ts"
+
+  local cache_file="$cache_dir/${sid}_${mode_tag}.md"
+  local db
+  db="$(get_db_path)" || return 1
+
+  local session_updated
+  session_updated="$(open_query "$db" "SELECT COALESCE(time_updated, 0) FROM session WHERE id = '$sid'")"
+
+  if [ -f "$cache_file" ] && [ -n "$session_updated" ]; then
+    local cache_mtime session_mtime
+    cache_mtime="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)"
+    session_mtime=$(( session_updated / 1000 ))
+    [ "$cache_mtime" -gt "$session_mtime" ] 2>/dev/null && { printf '%s' "$cache_file"; return 0; }
+  fi
+
+  render_transcript_impl "$sid" "$short" "$full" "$timestamps" > "$cache_file" 2>/dev/null
+  printf '%s' "$cache_file"
+}
+
+# ──────────────────────────────────────────────
+# Core transcript rendering
+# ──────────────────────────────────────────────
+render_transcript_impl() {
+  local sid="$1" short_mode="${2:-false}" full_mode="${3:-false}" ts_mode="${4:-false}"
+  local db
+  db="$(get_db_path)" || return 1
+
+  validate_sid "$sid" || { echo "${color_red}Invalid session ID: $sid${color_reset}" >&2; return 1; }
+
+  local session_info
+  session_info="$(open_query "$db" "
+    SELECT COALESCE(id, ''), COALESCE(slug, ''), COALESCE(title, ''), COALESCE(directory, ''),
+           COALESCE(agent, ''), COALESCE(model, ''), COALESCE(time_created, 0), COALESCE(time_updated, 0),
+           COALESCE(version, ''), COALESCE(parent_id, ''),
+           (SELECT COUNT(*) FROM message WHERE session_id = s.id),
+           (SELECT COUNT(*) FROM message WHERE session_id = s.id AND json_extract(data, '\$.role') = 'user')
+    FROM session s WHERE s.id = '$sid'
+  ")"
+
+  [ -z "$session_info" ] && { echo "${color_red}Session not found: $sid${color_reset}" >&2; return 1; }
+
+  local id slug title directory agent model_json time_created time_updated version parent_id msg_count user_msg_count
+  IFS='|' read -r id slug title directory agent model_json time_created time_updated \
+                         version parent_id msg_count user_msg_count <<< "$session_info"
+
+  local model_name="?"
+  if [ -n "$model_json" ]; then
+    model_name="$(printf '%s' "$model_json" | sed 's/.*"id":"//; s/".*//')"
+    [ -z "$model_name" ] && model_name="$(printf '%s' "$model_json" | sed 's/.*"providerID":"//; s/".*//')"
+  fi
+
+  local created_human="" updated_human=""
+  [ "${time_created:-0}" -gt 0 ] && created_human="$(date -d "@$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
+  [ "${time_updated:-0}" -gt 0 ] && updated_human="$(date -d "@$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
+
+  local display_title="${title:-Untitled}"
+  [ "$display_title" = "$slug" ] && display_title="Untitled"
+
+  # ── Metadata header ──
+  printf '%s# %s (%s)%s\n\n' "$color_bold" "$display_title" "$slug" "$color_reset"
+  printf '%s**Session:**%s   \`%s\`\n' "$color_dim" "$color_reset" "$id"
+  printf '%s**Slug:**%s      %s\n' "$color_dim" "$color_reset" "$slug"
+  [ -n "$directory" ] && printf '%s**Directory:**%s %s\n' "$color_dim" "$color_reset" "$directory"
+  [ -n "$agent" ] && printf '%s**Agent:**%s     %s\n' "$color_dim" "$color_reset" "$agent"
+  [ -n "$model_name" ] && printf '%s**Model:**%s     %s\n' "$color_dim" "$color_reset" "$model_name"
+  [ -n "$parent_id" ] && printf '%s**Fork of:**%s   %s\n' "$color_dim" "$color_reset" "$parent_id"
+  [ -n "$version" ] && printf '%s**Version:**%s   %s\n' "$color_dim" "$color_reset" "$version"
+  [ -n "$created_human" ] && printf '%s**Created:**%s  %s\n' "$color_dim" "$color_reset" "$created_human"
+  [ -n "$updated_human" ] && printf '%s**Updated:**%s  %s\n' "$color_dim" "$color_reset" "$updated_human"
+  printf '%s**Messages:**%s %s total, %s user\n\n' "$color_dim" "$color_reset" "${msg_count:-0}" "${user_msg_count:-0}"
+
+  # ── Query parts with newlines escaped in SQL ──
+  # sqlite3 CLI converts control chars (\x00-\x1f) to caret notation
+  # (e.g., \x1e becomes ^^), so use a visible text placeholder instead.
+  local RS=$'\x1f'
+  local NL_PLACEHOLDER='<@n@>'
+  local parts_data
+  parts_data="$(sqlite3 -separator "$RS" "$db" "
+    SELECT m.id,
+           json_extract(m.data, '\$.role'),
+           COALESCE(json_extract(m.data, '\$.time.created'), '0'),
+           COALESCE(json_extract(m.data, '\$.agent'), ''),
+           COALESCE(json_extract(m.data, '\$.modelID'), ''),
+           json_extract(p.data, '\$.type'),
+           REPLACE(COALESCE(json_extract(p.data, '\$.text'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+           COALESCE(json_extract(p.data, '\$.tool'), ''),
+           COALESCE(json_extract(p.data, '\$.state.status'), ''),
+           COALESCE(json_extract(p.data, '\$.callID'), '')
+    FROM message m JOIN part p ON p.message_id = m.id
+    WHERE m.session_id = '$sid'
+    ORDER BY m.time_created, p.time_created
+  " 2>/dev/null)"
+
+  [ -z "$parts_data" ] && { printf '_(no messages)_\n'; return 0; }
+
+  # Assemble into messages
+  local msg_ids=() msg_roles=() msg_times=() msg_agents=() msg_models=()
+  local msg_texts=()
+  local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text=""
+
+  local old_ifs="$IFS"
+  IFS="$RS"
+  while read -r mid role mtime agent model ptype ptext ptool pstatus pcid; do
+    [ -z "$mid" ] && continue
+
+    if [ "$mid" != "$cur_mid" ] && [ -n "$cur_mid" ]; then
+      msg_ids+=("$cur_mid")
+      msg_roles+=("$cur_role")
+      msg_times+=("$cur_time")
+      msg_agents+=("$cur_agent")
+      msg_models+=("$cur_model")
+      msg_texts+=("$cur_text")
+    fi
+
+    if [ "$mid" != "$cur_mid" ]; then
+      cur_mid="$mid"
+      cur_role="$role"
+      cur_time="$mtime"
+      cur_agent="$agent"
+      cur_model="$model"
+      cur_text=""
+    fi
+
+    # Restore newlines from placeholder
+    ptext="${ptext//$NL_PLACEHOLDER/$'\n'}"
+
+    case "$ptype" in
+      text)
+        [ -n "$ptext" ] && cur_text="${cur_text}${ptext}"$'\n'
+        ;;
+      reasoning)
+        [ "$full_mode" = "true" ] && [ -n "$ptext" ] && cur_text="${cur_text}${color_dim}∘ ${ptext}${color_reset}"$'\n'
+        ;;
+    esac
+  done <<< "$parts_data"
+  IFS="$old_ifs"
+
+  # Save last message
+  if [ -n "$cur_mid" ]; then
+    msg_ids+=("$cur_mid")
+    msg_roles+=("$cur_role")
+    msg_times+=("$cur_time")
+    msg_agents+=("$cur_agent")
+    msg_models+=("$cur_model")
+    msg_texts+=("$cur_text")
+  fi
+
+  local total_msgs="${#msg_ids[@]}"
+
+  # Normalize boolean flags
+  [ "$short_mode" = "1" ] && short_mode="true"
+  [ "$full_mode" = "1" ] && full_mode="true"
+  [ "$ts_mode" = "1" ] && ts_mode="true"
+
+  # ── Short mode ──
+  if [ "$short_mode" = "true" ] && [ "$total_msgs" -gt 6 ]; then
+    local first_n=3 last_n=3
+    local shown=0
+    for ((i=0; i<total_msgs; i++)); do
+      if [ "$i" -lt "$first_n" ] || [ "$i" -ge "$((total_msgs - last_n))" ]; then
+        local srole="${msg_roles[$i]}"
+        local sicon=""
+        case "$srole" in
+          user)      sicon="${color_green}❯${color_reset}" ;;
+          assistant) sicon="${color_blue_bold}●${color_reset}" ;;
+          *)         sicon=" " ;;
+        esac
+        local stext="${msg_texts[$i]}"
+        stext="$(printf '%s' "$stext" | head -1 | tr -d '\n' | head -c 120)"
+        [ -z "$stext" ] && stext="_(no text)_"
+        printf '%s %s %s\n' "$sicon" "$(printf '%s' "$srole" | sed 's/.*/\u&/')" "$stext"
+        shown=$((shown + 1))
+      fi
+    done
+    if [ "$shown" -lt "$total_msgs" ]; then
+      printf '%s  … (%d messages hidden) …%s\n' "$color_dim" "$((total_msgs - shown))" "$color_reset"
+    fi
+    return 0
+  fi
+
+  # ── Full / conversation mode ──
+  local RS=$'\x1f'
+
+  for ((i=0; i<total_msgs; i++)); do
+    local mrole="${msg_roles[$i]}"
+    local mtime="${msg_times[$i]}"
+    local magent="${msg_agents[$i]}"
+    local mmodel="${msg_models[$i]}"
+    local mtext="${msg_texts[$i]}"
+
+    [ "$i" -gt 0 ] && printf '\n'
+
+    local icon label
+    case "$mrole" in
+      user)
+        icon="${color_green}❯${color_reset}"
+        label="${color_green_bold}User${color_reset}"
+        [ -n "$magent" ] && label="${label} ${color_dim}(${magent})${color_reset}"
+        ;;
+      assistant)
+        icon="${color_blue_bold}●${color_reset}"
+        label="${color_blue_bold}Assistant${color_reset}"
+        [ -n "$mmodel" ] && label="${label} ${color_dim}(${mmodel})${color_reset}"
+        ;;
+      *)
+        icon=" "
+        label="$mrole"
+        ;;
+    esac
+
+    if [ "$ts_mode" = "true" ] && [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
+      local ts
+      ts="$(date -d "@$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || date -r "$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || echo "")"
+      label="${label} ${color_dim}[${ts}]${color_reset}"
+    fi
+
+    printf '%s %s\n' "$icon" "$label"
+
+    if [ -n "$mtext" ]; then
+      printf '%s\n' "$mtext" | sed 's/^/  /'
+    fi
+
+    # Show tool parts if full_mode
+    if [ "$full_mode" = "true" ]; then
+      local tool_parts
+      tool_parts="$(sqlite3 -separator "$RS" "$db" "
+        SELECT COALESCE(json_extract(data, '\$.tool'), ''),
+               COALESCE(json_extract(data, '\$.state.status'), ''),
+               REPLACE(COALESCE(json_extract(data, '\$.state.input'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+               REPLACE(COALESCE(json_extract(data, '\$.state.output'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+               COALESCE(json_extract(data, '\$.callID'), '')
+        FROM part WHERE message_id = '${msg_ids[$i]}'
+          AND json_extract(data, '\$.type') = 'tool'
+        ORDER BY time_created
+      " 2>/dev/null)"
+
+      if [ -n "$tool_parts" ]; then
+        printf '\n'
+        local old_ifs="$IFS"
+        IFS="$RS"
+        while read -r tname tstatus tinput toutput tcid; do
+          [ -z "$tname" ] && continue
+          # Restore newlines in tool input/output
+          tinput="${tinput//$NL_PLACEHOLDER/$'\n'}"
+          toutput="${toutput//$NL_PLACEHOLDER/$'\n'}"
+          local status_color="$color_green"
+          [ "$tstatus" = "error" ] && status_color="$color_red"
+          printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
+          if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
+            local input_preview
+            input_preview="$(printf '%s' "$tinput" | head -c 300)"
+            printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
+          fi
+          if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
+            local output_preview
+            output_preview="$(printf '%s' "$toutput" | head -c 2000 | head -n 20)"
+            printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
+            while IFS= read -r oline; do
+              printf '      %s\n' "$oline"
+            done <<< "$output_preview"
+            printf '    %s────────────%s\n' "$color_dim" "$color_reset"
+          fi
+        done <<< "$tool_parts"
+        IFS="$old_ifs"
+      fi
+    fi
+  done
+
+  printf '\n%s────────────────────────────────────────%s\n' "$color_dim" "$color_reset"
+}
+
+# ──────────────────────────────────────────────
+# Mode entry points
+# ──────────────────────────────────────────────
+
+transcript_mode() {
+  local sid=""
+  local short_mode="${OPENCODE_RESUME_TRANSCRIPT_SHORT:-false}"
+  local full_mode="${OPENCODE_RESUME_TRANSCRIPT_FULL:-false}"
+  local ts_mode="${OPENCODE_RESUME_TRANSCRIPT_TIMESTAMPS:-false}"
+  local args=()
+
+  for arg in "$@"; do
+    case "$arg" in
+      --short)         short_mode=true ;;
+      --full|--with-tools|-f) full_mode=true ;;
+      --timestamps|-T) ts_mode=true ;;
+      --preview)       ;; # skip, used internally
+      -*)              echo "opencode-resume: unknown transcript flag: $arg" >&2; return 1 ;;
+      *)               args+=("$arg") ;;
+    esac
+  done
+
+  sid="${args[0]:-}"
+  [ -z "$sid" ] && { echo "opencode-resume: --transcript needs a session id" >&2; return 1; }
+
+  render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode"
+}
+
+edit_mode() {
+  local sid="$1"
+  [ -z "$sid" ] && { echo "opencode-resume: --edit needs a session id" >&2; return 1; }
+
+  local db
+  db="$(get_db_path)" || return 1
+
+  validate_sid "$sid" || { echo "Invalid session ID: $sid" >&2; return 1; }
+
+  local tmpdir="${TMPDIR:-/tmp}"
+  local tmpfile="$tmpdir/opencode-resume-transcript-${sid}.md"
+
+  render_transcript_impl "$sid" false false false > "$tmpfile" 2>/dev/null
+  [ ! -f "$tmpfile" ] && { echo "Failed to render transcript" >&2; return 1; }
+
+  # Read editor preference
+  local editor_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode-resume/editor"
+  local chosen_editor=""
+  [ -f "$editor_config" ] && chosen_editor="$(cat "$editor_config")"
+
+  if [ -z "$chosen_editor" ]; then
+    printf '\n%sChoose editor:%s\n' "$color_bold" "$color_reset"
+    printf '  %so%s = xdg-open  %sc%s = code  %sn%s = nvim  %sv%s = vim\n' \
+      "$color_green" "$color_reset" "$color_green" "$color_reset" \
+      "$color_green" "$color_reset" "$color_green" "$color_reset"
+    printf '  %sm%s = micro  %se%s = emacs  %sb%s = breeze\n' \
+      "$color_green" "$color_reset" "$color_green" "$color_reset" "$color_green" "$color_reset"
+    printf 'Editor shortcut [%so%s]: ' "$color_green" "$color_reset"
+    local reply
+    IFS= read -r reply </dev/tty || reply=""
+    reply="${reply:-o}"
+    case "$reply" in
+      o) chosen_editor="xdg-open" ;;
+      c) chosen_editor="code" ;;
+      n) chosen_editor="nvim" ;;
+      v) chosen_editor="vim" ;;
+      m) chosen_editor="micro" ;;
+      e) chosen_editor="emacs" ;;
+      b) chosen_editor="breeze" ;;
+      *) echo "Unknown editor: $reply, falling back to xdg-open" >&2; chosen_editor="xdg-open" ;;
+    esac
+    mkdir -p "$(dirname "$editor_config")" 2>/dev/null
+    printf '%s' "$chosen_editor" > "$editor_config"
+    printf '%sEditor preference saved to %s%s\n' "$color_dim" "$editor_config" "$color_reset" >&2
+  fi
+
+  printf '%sOpening transcript in %s...%s\n' "$color_dim" "$chosen_editor" "$color_reset" >&2
+  $chosen_editor "$tmpfile" </dev/tty >/dev/tty 2>&1 || {
+    echo "Failed to open editor '$chosen_editor'" >&2
+    return 1
+  }
+}
+
+all_transcripts_mode() {
+  local filter="${1:-}"
+  local db
+  db="$(get_db_path)" || return 1
+
+  local sessions
+  if [ -n "$filter" ]; then
+    sessions="$(open_query "$db" "SELECT id, slug, title FROM session WHERE id LIKE '%$filter%' OR slug LIKE '%$filter%' OR title LIKE '%$filter%' ORDER BY time_updated DESC")"
+  else
+    sessions="$(open_query "$db" "SELECT id, slug, title FROM session ORDER BY time_updated DESC")"
+  fi
+
+  [ -z "$sessions" ] && { echo "No sessions found." >&2; return 0; }
+
+  local count=0
+  while IFS='|' read -r sid slug title; do
+    [ -z "$sid" ] && continue
+    count=$((count + 1))
+    printf '%s\n' "========================================================================"
+    printf '%s[%d/%d] %s — %s%s\n' "$color_bold" "$count" "$(echo "$sessions" | wc -l)" "$title" "$slug" "$color_reset"
+    printf '%s\n' "========================================================================"
+    render_transcript_impl "$sid" false false false
+    printf '\n\n'
+  done <<< "$sessions"
+}
 
 get_db_path() {
   if [ -z "$OPENCODE_DB" ]; then
@@ -143,8 +585,14 @@ main() {
 
   init_picker_state with-group
 
+  # Preview mode file for cycling transcript view
+  OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-preview-mode-XXXXXX")"
+  export OPENCODE_RESUME_PREVIEW_MODE_FILE
+  echo conversation > "$OPENCODE_RESUME_PREVIEW_MODE_FILE" 2>/dev/null || true
+  trap 'rm -f "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
+
   local fzf_header='Enter: resume   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping'
-  fzf_header="$fzf_header"$'\n''CTRL-/: cycle layout'
+  fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-F: cycle preview   CTRL-/: layout'
 
   while :; do
     local out
@@ -162,6 +610,9 @@ main() {
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
+          --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
+          --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
+          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
           --bind 'pgup:preview-half-page-up,pgdn:preview-half-page-down' \
           --bind 'enter:accept-non-empty' \
           --bind 'del:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
@@ -176,7 +627,7 @@ main() {
     [ "${#session_ids[@]}" -eq 0 ] && return 0
 
     local target="${session_ids[${#session_ids[@]} - 1]}"
-    rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE"
+    rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE" "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
     resume_session "$db" "$target"
     break
   done
@@ -371,60 +822,25 @@ preview_session() {
   local sid="$1"
   [ -z "$sid" ] && return 0
 
-  local db
-  db="$(get_db_path)" || return 1
+  validate_sid "$sid" || { echo "${color_red}Invalid session ID: $sid${color_reset}" >&2; return 1; }
 
-  local data
-  data="$(open_query "$db" "
-    SELECT COALESCE(s.id, ''), COALESCE(s.slug, ''), COALESCE(s.title, ''), COALESCE(s.directory, ''),
-           COALESCE(s.agent, ''), COALESCE(s.model, ''),
-           COALESCE(s.time_created, 0), COALESCE(s.time_updated, 0),
-           COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), COALESCE(s.summary_files, 0),
-           COALESCE(s.version, ''), COALESCE(s.parent_id, ''),
-           (SELECT COUNT(*) FROM message WHERE session_id = s.id),
-           (SELECT COUNT(*) FROM message WHERE session_id = s.id AND json_extract(data, '$.role') = 'user')
-    FROM session s WHERE s.id = '$sid'
-  ")"
-  [ -z "$data" ] && return 0
+  local mode
+  mode="$(preview_mode_file)"
 
-  local id slug title directory agent model time_created time_updated
-  local summary_additions summary_deletions summary_files version parent_id msg_count user_msg_count
-  IFS='|' read -r id slug title directory agent model time_created time_updated \
-                         summary_additions summary_deletions summary_files version parent_id \
-                         msg_count user_msg_count <<< "$data"
+  local short=false full=false
+  case "$mode" in
+    short) short=true ;;
+    full)  full=true  ;;
+  esac
 
-  local bold="${color_reset}${color_bold}"
-
-  printf '%s# Session: %s (%s)%s\n\n' "$bold" "$id" "$slug" "$color_reset"
-
-  if [ -n "$title" ] && [ "$title" != "$slug" ]; then
-    printf '%sTitle:%s   %s%s\n' "$bold" "$color_unbold" "$title" "$color_reset"
+  local cache_file
+  cache_file="$(session_transcript_cache "$sid" "$short" "$full")"
+  if [ -f "$cache_file" ]; then
+    cat "$cache_file"
+  else
+    # Fallback: render directly
+    render_transcript_impl "$sid" "$short" "$full"
   fi
-  printf '%sSession:%s %s%s\n' "$bold" "$color_unbold" "$id" "$color_reset"
-  printf '%sSlug:%s    %s%s\n' "$bold" "$color_unbold" "$slug" "$color_reset"
-  [ -n "$parent_id" ] && printf '%sFork of:%s %s%s\n' "$bold" "$color_unbold" "$parent_id" "$color_reset"
-  printf '%sDirectory:%s %s%s\n' "$bold" "$color_unbold" "$directory" "$color_reset"
-  printf '%sAgent:%s    %s%s\n' "$bold" "$color_unbold" "$agent" "$color_reset"
-
-  local model_name="?"
-  [ -n "$model" ] && model_name="$(printf '%s' "$model" | sed 's/.*"id":"//; s/".*//')"
-  printf '%sModel:%s    %s%s\n' "$bold" "$color_unbold" "$model_name" "$color_reset"
-  [ -n "$version" ] && printf '%sVersion:%s  %s%s\n' "$bold" "$color_unbold" "$version" "$color_reset"
-
-  local created_human="" updated_human=""
-  [ "${time_created:-0}" -gt 0 ] && created_human="$(date -d "@$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_created / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
-  [ "${time_updated:-0}" -gt 0 ] && updated_human="$(date -d "@$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((time_updated / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "unknown")"
-  [ -n "$created_human" ] && printf '%sCreated:%s %s%s\n' "$bold" "$color_unbold" "$created_human" "$color_reset"
-  [ -n "$updated_human" ] && printf '%sUpdated:%s %s%s\n' "$bold" "$color_unbold" "$updated_human" "$color_reset"
-
-  local file_summary=""
-  [ "${summary_files:-0}" -gt 0 ] || [ "${summary_additions:-0}" -gt 0 ] || [ "${summary_deletions:-0}" -gt 0 ] && \
-    file_summary="${summary_files} files, +${summary_additions}/-${summary_deletions}"
-
-  printf '%sMessages:%s %d total, %d user%s\n' "$bold" "$color_unbold" "${msg_count:-0}" "${user_msg_count:-0}" "$color_reset"
-  [ -n "$file_summary" ] && printf '%sChanges:%s  %s%s\n' "$bold" "$color_unbold" "$file_summary" "$color_reset"
-
-  printf '\n%s-- Session metadata (transcript view coming in milestone 2) --%s\n' "$color_dim" "$color_reset"
 }
 
 resume_session() {
@@ -573,17 +989,22 @@ while [ "$#" -gt 0 ]; do
       set -- "${exploded[@]}" "$@"
       continue
       ;;
-    -t|--transcript)       echo "opencode-resume: transcript mode deferred to milestone 2" >&2; exit 2 ;;
-    -e|--edit)             echo "opencode-resume: edit mode deferred to milestone 2" >&2; exit 2 ;;
+    -t|--transcript)       set_mode_action transcript ;;
+    -e|--edit)             set_mode_action edit ;;
     -S|--search)           echo "opencode-resume: search mode deferred to milestone 3" >&2; exit 2 ;;
-    -a|--all-transcripts)  echo "opencode-resume: all-transcripts deferred to milestone 2" >&2; exit 2 ;;
+    -a|--all-transcripts)  set_mode_action all-transcripts ;;
     --preview)             set_mode_action preview ;;
+    --short)               export OPENCODE_RESUME_TRANSCRIPT_SHORT=1 ;;
+    --full|--with-tools|-f) export OPENCODE_RESUME_TRANSCRIPT_FULL=1 ;;
+    --timestamps|-T)       export OPENCODE_RESUME_TRANSCRIPT_TIMESTAMPS=1 ;;
     -r|--resume)           set_mode_action resume ;;
     -l|--list)             set_mode_action list ;;
     --delete-marked)       set_mode_action delete-marked ;;
     --rename-session)      set_mode_action rename-session ;;
     --cycle-preview-layout) set_mode_action cycle-preview-layout ;;
     --print-preview-layout) set_mode_action print-preview-layout ;;
+    --cycle-preview-mode)   set_mode_action cycle-preview-mode ;;
+    --print-preview-mode)   set_mode_action print-preview-mode ;;
     -h|--help)
       sed -nE '/opencode-resume/,/^$/ { /^$/q; s/^# ?//; p; }' "$0"
       exit 0 ;;
@@ -608,6 +1029,14 @@ init_colors
 
 case "$mode_action" in
   preview)      preview_session "${positional[0]:-}" ;;
+  transcript)
+    [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --transcript needs a session id" >&2; exit 2; }
+    transcript_mode "${positional[@]}" ;;
+  edit)
+    [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --edit needs a session id" >&2; exit 2; }
+    edit_mode "${positional[0]}" ;;
+  all-transcripts)
+    all_transcripts_mode "${positional[0]:-}" ;;
   resume)
     [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --resume needs an id or title" >&2; exit 2; }
     resume_by_query "${positional[0]}" ;;
@@ -626,5 +1055,10 @@ case "$mode_action" in
     preview_layout_spec "$(cat "$f" 2>/dev/null)" ;;
   print-preview-layout)
     preview_layout_spec "$(cat "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}" 2>/dev/null)" ;;
+  cycle-preview-mode)
+    preview_mode_file cycle
+    preview_mode_spec ;;
+  print-preview-mode)
+    preview_mode_spec ;;
   "") main "${positional[@]}" ;;
 esac
