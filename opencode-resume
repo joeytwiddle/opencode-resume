@@ -404,7 +404,7 @@ render_transcript_impl() {
     printf '%s %s\n' "$icon" "$label"
 
     if [ -n "$mtext" ]; then
-      printf '%s\n' "$mtext" | sed 's/^/  /'
+      printf '  %s\n' "${mtext//$'\n'/$'\n  '}"
     fi
 
     # Show tool parts if full_mode
