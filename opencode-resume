@@ -353,9 +353,10 @@ render_transcript_impl() {
           *)         sicon=" " ;;
         esac
         local stext="${msg_texts[$i]}"
-        stext="$(printf '%s' "$stext" | head -1 | tr -d '\n' | head -c 120)"
+        stext="${stext%%$'\n'*}"
+        stext="${stext:0:120}"
         [ -z "$stext" ] && stext="_(no text)_"
-        printf '%s %s %s\n' "$sicon" "$(printf '%s' "$srole" | sed 's/.*/\u&/')" "$stext"
+        printf '%s %s %s\n' "$sicon" "${srole^}" "$stext"
         shown=$((shown + 1))
       fi
     done
@@ -420,13 +421,18 @@ render_transcript_impl() {
         [ "$tstatus" = "error" ] && status_color="$color_red"
         printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
         if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
-          local input_preview
-          input_preview="$(printf '%s' "$tinput" | head -c 300)"
+          local input_preview="${tinput:0:300}"
           printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
         fi
         if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
-          local output_preview
-          output_preview="$(printf '%s' "$toutput" | head -c 2000 | head -n 20)"
+          local oline ocount=0
+          local output_preview=""
+          while IFS= read -r oline; do
+            [ "$ocount" -ge 20 ] && break
+            [ -n "$output_preview" ] && output_preview="$output_preview"$'\n'
+            output_preview="$output_preview$oline"
+            ocount=$((ocount + 1))
+          done <<< "${toutput:0:2000}"
           printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
           while IFS= read -r oline; do
             printf '      %s\n' "$oline"
@@ -550,10 +556,15 @@ all_transcripts_mode() {
 
 get_db_path() {
   if [ -z "$OPENCODE_DB" ]; then
-    OPENCODE_DB="$(opencode db path 2>/dev/null)" || {
-      echo "opencode-resume: cannot find opencode database" >&2
-      return 1
-    }
+    local default="$HOME/.local/share/opencode/opencode.db"
+    if [ -f "$default" ]; then
+      OPENCODE_DB="$default"
+    else
+      OPENCODE_DB="$(opencode db path 2>/dev/null)" || {
+        echo "opencode-resume: cannot find opencode database" >&2
+        return 1
+      }
+    fi
   fi
   printf '%s' "$OPENCODE_DB"
 }
