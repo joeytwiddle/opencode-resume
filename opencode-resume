@@ -248,8 +248,7 @@ render_transcript_impl() {
   # sqlite3 CLI converts control chars (\x00-\x1f) to caret notation
   # (e.g., \x1e becomes ^^), so use a visible text placeholder instead.
   local RS=$'\x1f'
-  local NL_PLACEHOLDER='<@n@>'
-  local tool_sep=$'\x1e'
+  local NL_PLACEHOLDER='_NL_'
   local field_sep=$'\x1f'
   local parts_data
   parts_data="$(sqlite3 -separator "$RS" "$db" "
@@ -274,8 +273,9 @@ render_transcript_impl() {
 
   # Assemble into messages
   local msg_ids=() msg_roles=() msg_times=() msg_agents=() msg_models=()
-  local msg_texts=() msg_tools=()
-  local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text="" cur_tools=""
+  local msg_texts=() tool_records=() msg_tool_start=() msg_tool_end=()
+  local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text=""
+  local cur_tool_start=0
 
   local old_ifs="$IFS"
   IFS="$RS"
@@ -289,7 +289,8 @@ render_transcript_impl() {
       msg_agents+=("$cur_agent")
       msg_models+=("$cur_model")
       msg_texts+=("$cur_text")
-      msg_tools+=("$cur_tools")
+      msg_tool_start+=("$cur_tool_start")
+      msg_tool_end+=("${#tool_records[@]}")
     fi
 
     if [ "$mid" != "$cur_mid" ]; then
@@ -299,11 +300,8 @@ render_transcript_impl() {
       cur_agent="$agent"
       cur_model="$model"
       cur_text=""
-      cur_tools=""
+      cur_tool_start="${#tool_records[@]}"
     fi
-
-    # Restore newlines from placeholder
-    ptext="${ptext//$NL_PLACEHOLDER/$'\n'}"
 
     case "$ptype" in
       text)
@@ -313,9 +311,7 @@ render_transcript_impl() {
         [ "$full_mode" = "true" ] && [ -n "$ptext" ] && cur_text="${cur_text}${color_dim}∘ ${ptext}${color_reset}"$'\n'
         ;;
       tool)
-        pinput="${pinput//$NL_PLACEHOLDER/$'\n'}"
-        poutput="${poutput//$NL_PLACEHOLDER/$'\n'}"
-        cur_tools="${cur_tools}${cur_tools:+$tool_sep}${ptool}${field_sep}${pstatus}${field_sep}${pinput}${field_sep}${poutput}${field_sep}${pcid}"
+        tool_records+=("${ptool}${field_sep}${pstatus}${field_sep}${pinput}${field_sep}${poutput}${field_sep}${pcid}")
         ;;
     esac
   done <<< "$parts_data"
@@ -329,7 +325,8 @@ render_transcript_impl() {
     msg_agents+=("$cur_agent")
     msg_models+=("$cur_model")
     msg_texts+=("$cur_text")
-    msg_tools+=("$cur_tools")
+    msg_tool_start+=("$cur_tool_start")
+    msg_tool_end+=("${#tool_records[@]}")
   fi
 
   local total_msgs="${#msg_ids[@]}"
@@ -353,6 +350,7 @@ render_transcript_impl() {
           *)         sicon=" " ;;
         esac
         local stext="${msg_texts[$i]}"
+        stext="${stext%%$NL_PLACEHOLDER*}"
         stext="${stext%%$'\n'*}"
         stext="${stext:0:120}"
         [ -z "$stext" ] && stext="_(no text)_"
@@ -405,42 +403,54 @@ render_transcript_impl() {
     printf '%s %s\n' "$icon" "$label"
 
     if [ -n "$mtext" ]; then
-      printf '  %s\n' "${mtext//$'\n'/$'\n  '}"
+      printf '%s\n' "$(printf '%s' "$mtext" | sed 's/_NL_/\n/g')" | sed 's/^/  /'
     fi
 
     # Show tool parts if full_mode
-    if [ "$full_mode" = "true" ] && [ -n "${msg_tools[$i]:-}" ]; then
-      local tool_data="${msg_tools[$i]}"
-      printf '\n'
-      local old_ifs="$IFS"
-      IFS=$'\x1e'
-      for tool_rec in $tool_data; do
-        [ -z "$tool_rec" ] && continue
-        IFS=$'\x1f' read -r tname tstatus tinput toutput tcid <<< "$tool_rec"
-        local status_color="$color_green"
-        [ "$tstatus" = "error" ] && status_color="$color_red"
-        printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
-        if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
-          local input_preview="${tinput:0:300}"
-          printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
-        fi
-        if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
-          local oline ocount=0
-          local output_preview=""
-          while IFS= read -r oline; do
-            [ "$ocount" -ge 20 ] && break
-            [ -n "$output_preview" ] && output_preview="$output_preview"$'\n'
-            output_preview="$output_preview$oline"
-            ocount=$((ocount + 1))
-          done <<< "${toutput:0:2000}"
-          printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
-          while IFS= read -r oline; do
-            printf '      %s\n' "$oline"
-          done <<< "$output_preview"
-          printf '    %s────────────%s\n' "$color_dim" "$color_reset"
-        fi
-      done
-      IFS="$old_ifs"
+    if [ "$full_mode" = "true" ]; then
+      local t_start="${msg_tool_start[$i]}"
+      local t_end="${msg_tool_end[$i]}"
+      if [ "$t_end" -gt "$t_start" ]; then
+        printf '\n'
+        for ((j=t_start; j<t_end; j++)); do
+          local tool_rec="${tool_records[$j]}"
+          local old_ifs2="$IFS"
+          IFS=$'\x1f'
+          set -f
+          local tool_fields=($tool_rec)
+          set +f
+          IFS="$old_ifs2"
+          local tname="${tool_fields[0]}"
+          local tstatus="${tool_fields[1]}"
+          local tinput="${tool_fields[2]}"
+          local toutput="${tool_fields[3]}"
+          local tcid="${tool_fields[4]}"
+          [[ "$tinput" == *"$NL_PLACEHOLDER"* ]] && tinput="$(printf '%s' "$tinput" | sed 's/_NL_/\n/g')"
+          [[ "$toutput" == *"$NL_PLACEHOLDER"* ]] && toutput="$(printf '%s' "$toutput" | sed 's/_NL_/\n/g')"
+          local status_color="$color_green"
+          [ "$tstatus" = "error" ] && status_color="$color_red"
+          printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
+          if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
+            local input_preview="${tinput:0:300}"
+            printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
+          fi
+          if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
+            local oline ocount=0
+            local output_preview=""
+            while IFS= read -r oline; do
+              [ "$ocount" -ge 20 ] && break
+              [ -n "$output_preview" ] && output_preview="$output_preview"$'\n'
+              output_preview="$output_preview$oline"
+              ocount=$((ocount + 1))
+            done <<< "${toutput:0:2000}"
+            printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
+            while IFS= read -r oline; do
+              printf '      %s\n' "$oline"
+            done <<< "$output_preview"
+            printf '    %s────────────%s\n' "$color_dim" "$color_reset"
+          fi
+        done
+      fi
     fi
   done
 
