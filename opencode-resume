@@ -249,6 +249,8 @@ render_transcript_impl() {
   # (e.g., \x1e becomes ^^), so use a visible text placeholder instead.
   local RS=$'\x1f'
   local NL_PLACEHOLDER='<@n@>'
+  local tool_sep=$'\x1e'
+  local field_sep=$'\x1f'
   local parts_data
   parts_data="$(sqlite3 -separator "$RS" "$db" "
     SELECT m.id,
@@ -256,12 +258,14 @@ render_transcript_impl() {
            COALESCE(json_extract(m.data, '\$.time.created'), '0'),
            COALESCE(json_extract(m.data, '\$.agent'), ''),
            COALESCE(json_extract(m.data, '\$.modelID'), ''),
-           json_extract(p.data, '\$.type'),
-           REPLACE(COALESCE(json_extract(p.data, '\$.text'), ''), CHAR(10), '$NL_PLACEHOLDER'),
-           COALESCE(json_extract(p.data, '\$.tool'), ''),
-           COALESCE(json_extract(p.data, '\$.state.status'), ''),
-           COALESCE(json_extract(p.data, '\$.callID'), '')
-    FROM message m JOIN part p ON p.message_id = m.id
+            json_extract(p.data, '\$.type'),
+            REPLACE(COALESCE(json_extract(p.data, '\$.text'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+            COALESCE(json_extract(p.data, '\$.tool'), ''),
+            COALESCE(json_extract(p.data, '\$.state.status'), ''),
+            COALESCE(json_extract(p.data, '\$.callID'), ''),
+            REPLACE(COALESCE(json_extract(p.data, '\$.state.input'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+            REPLACE(COALESCE(json_extract(p.data, '\$.state.output'), ''), CHAR(10), '$NL_PLACEHOLDER')
+     FROM message m JOIN part p ON p.message_id = m.id
     WHERE m.session_id = '$sid'
     ORDER BY m.time_created, p.time_created
   " 2>/dev/null)"
@@ -270,12 +274,12 @@ render_transcript_impl() {
 
   # Assemble into messages
   local msg_ids=() msg_roles=() msg_times=() msg_agents=() msg_models=()
-  local msg_texts=()
-  local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text=""
+  local msg_texts=() msg_tools=()
+  local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text="" cur_tools=""
 
   local old_ifs="$IFS"
   IFS="$RS"
-  while read -r mid role mtime agent model ptype ptext ptool pstatus pcid; do
+  while read -r mid role mtime agent model ptype ptext ptool pstatus pcid pinput poutput; do
     [ -z "$mid" ] && continue
 
     if [ "$mid" != "$cur_mid" ] && [ -n "$cur_mid" ]; then
@@ -285,6 +289,7 @@ render_transcript_impl() {
       msg_agents+=("$cur_agent")
       msg_models+=("$cur_model")
       msg_texts+=("$cur_text")
+      msg_tools+=("$cur_tools")
     fi
 
     if [ "$mid" != "$cur_mid" ]; then
@@ -294,6 +299,7 @@ render_transcript_impl() {
       cur_agent="$agent"
       cur_model="$model"
       cur_text=""
+      cur_tools=""
     fi
 
     # Restore newlines from placeholder
@@ -305,6 +311,11 @@ render_transcript_impl() {
         ;;
       reasoning)
         [ "$full_mode" = "true" ] && [ -n "$ptext" ] && cur_text="${cur_text}${color_dim}∘ ${ptext}${color_reset}"$'\n'
+        ;;
+      tool)
+        pinput="${pinput//$NL_PLACEHOLDER/$'\n'}"
+        poutput="${poutput//$NL_PLACEHOLDER/$'\n'}"
+        cur_tools="${cur_tools}${cur_tools:+$tool_sep}${ptool}${field_sep}${pstatus}${field_sep}${pinput}${field_sep}${poutput}${field_sep}${pcid}"
         ;;
     esac
   done <<< "$parts_data"
@@ -318,6 +329,7 @@ render_transcript_impl() {
     msg_agents+=("$cur_agent")
     msg_models+=("$cur_model")
     msg_texts+=("$cur_text")
+    msg_tools+=("$cur_tools")
   fi
 
   local total_msgs="${#msg_ids[@]}"
@@ -396,48 +408,33 @@ render_transcript_impl() {
     fi
 
     # Show tool parts if full_mode
-    if [ "$full_mode" = "true" ]; then
-      local tool_parts
-      tool_parts="$(sqlite3 -separator "$RS" "$db" "
-        SELECT COALESCE(json_extract(data, '\$.tool'), ''),
-               COALESCE(json_extract(data, '\$.state.status'), ''),
-               REPLACE(COALESCE(json_extract(data, '\$.state.input'), ''), CHAR(10), '$NL_PLACEHOLDER'),
-               REPLACE(COALESCE(json_extract(data, '\$.state.output'), ''), CHAR(10), '$NL_PLACEHOLDER'),
-               COALESCE(json_extract(data, '\$.callID'), '')
-        FROM part WHERE message_id = '${msg_ids[$i]}'
-          AND json_extract(data, '\$.type') = 'tool'
-        ORDER BY time_created
-      " 2>/dev/null)"
-
-      if [ -n "$tool_parts" ]; then
-        printf '\n'
-        local old_ifs="$IFS"
-        IFS="$RS"
-        while read -r tname tstatus tinput toutput tcid; do
-          [ -z "$tname" ] && continue
-          # Restore newlines in tool input/output
-          tinput="${tinput//$NL_PLACEHOLDER/$'\n'}"
-          toutput="${toutput//$NL_PLACEHOLDER/$'\n'}"
-          local status_color="$color_green"
-          [ "$tstatus" = "error" ] && status_color="$color_red"
-          printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
-          if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
-            local input_preview
-            input_preview="$(printf '%s' "$tinput" | head -c 300)"
-            printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
-          fi
-          if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
-            local output_preview
-            output_preview="$(printf '%s' "$toutput" | head -c 2000 | head -n 20)"
-            printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
-            while IFS= read -r oline; do
-              printf '      %s\n' "$oline"
-            done <<< "$output_preview"
-            printf '    %s────────────%s\n' "$color_dim" "$color_reset"
-          fi
-        done <<< "$tool_parts"
-        IFS="$old_ifs"
-      fi
+    if [ "$full_mode" = "true" ] && [ -n "${msg_tools[$i]:-}" ]; then
+      local tool_data="${msg_tools[$i]}"
+      printf '\n'
+      local old_ifs="$IFS"
+      IFS=$'\x1e'
+      for tool_rec in $tool_data; do
+        [ -z "$tool_rec" ] && continue
+        IFS=$'\x1f' read -r tname tstatus tinput toutput tcid <<< "$tool_rec"
+        local status_color="$color_green"
+        [ "$tstatus" = "error" ] && status_color="$color_red"
+        printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
+        if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
+          local input_preview
+          input_preview="$(printf '%s' "$tinput" | head -c 300)"
+          printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
+        fi
+        if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
+          local output_preview
+          output_preview="$(printf '%s' "$toutput" | head -c 2000 | head -n 20)"
+          printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
+          while IFS= read -r oline; do
+            printf '      %s\n' "$oline"
+          done <<< "$output_preview"
+          printf '    %s────────────%s\n' "$color_dim" "$color_reset"
+        fi
+      done
+      IFS="$old_ifs"
     fi
   done
 
