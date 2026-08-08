@@ -446,7 +446,7 @@ render_transcript_impl() {
 
     if [ "$ts_mode" = "true" ] && [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
       local ts
-      ts="$(date -d "@$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || date -r "$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || echo "")"
+      ts="$(date -d "@$((mtime / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || date -r "$((mtime / 1000))" '+%Y-%m-%d %a %H:%M:%S' 2>/dev/null || echo "")"
       label="${label} ${color_timestamp}[${ts}]${color_reset}"
     fi
 
@@ -1316,6 +1316,7 @@ check_prerequisites() {
   command -v fzf     >/dev/null 2>&1 || missing+=("fzf")
   command -v sqlite3 >/dev/null 2>&1 || missing+=("sqlite3")
   command -v opencode >/dev/null 2>&1 || missing+=("opencode")
+
 
   [ "${#missing[@]}" -eq 0 ] && return 0
 
