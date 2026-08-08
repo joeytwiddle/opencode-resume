@@ -481,8 +481,25 @@ render_transcript_impl() {
           [ "$tstatus" = "error" ] && status_color="$color_red"
           printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
           if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
-            local input_preview="${tinput:0:300}"
-            printf '    %sInput:%s %s\n' "$color_tool_use" "$color_reset" "$input_preview"
+            printf '    %sInput:%s\n' "$color_tool_use" "$color_reset"
+            local input_pretty
+            if command -v python3 >/dev/null 2>&1; then
+              input_pretty="$(printf '%s' "$tinput" | python3 -m json.tool 2>/dev/null)" || input_pretty=""
+            fi
+            if [ -z "$input_pretty" ] && command -v python >/dev/null 2>&1; then
+              input_pretty="$(printf '%s' "$tinput" | python -m json.tool 2>/dev/null)" || input_pretty=""
+            fi
+            if [ -n "$input_pretty" ]; then
+              local iline iline_count=0
+              while IFS= read -r iline; do
+                [ "$iline_count" -ge 10 ] && break
+                printf '      %s\n' "$iline"
+                iline_count=$((iline_count + 1))
+              done <<< "$input_pretty"
+            else
+              local input_preview="${tinput:0:300}"
+              printf '      %s\n' "$input_preview"
+            fi
           fi
           if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
             local oline ocount=0
