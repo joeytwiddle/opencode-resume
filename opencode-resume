@@ -756,7 +756,7 @@ main() {
           --expect=ctrl-n \
           --header="$fzf_header" \
           --preview 'opencode-resume --preview {1}' \
-          --preview-window 'right,50%,wrap,border-left' \
+          --preview-window 'hidden,right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
@@ -1194,7 +1194,7 @@ main_search() {
           --query="$query" \
           --header="$fzf_header" \
           --preview 'opencode-resume --search-preview {1} {q}' \
-          --preview-window 'right,50%,wrap,border-left' \
+          --preview-window 'hidden,right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'start:reload:opencode-resume --search-list+change:reload:opencode-resume --search-list {q}' \
           --bind 'ctrl-s:abort' \
