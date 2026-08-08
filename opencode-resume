@@ -792,7 +792,11 @@ main() {
 
     local target="${session_ids[${#session_ids[@]} - 1]}"
     rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE" "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
-    if [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
+    if [ -n "${OPENCODE_RESUME_PRINT_MODE:-}" ]; then
+      local sid
+      for sid in "${session_ids[@]}"; do printf '%s\n' "$sid"; done
+      break
+    elif [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
       "$0" --transcript --full "$target" | command less -RX
     elif [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]; then
       "$0" --edit "$target"
@@ -1489,6 +1493,7 @@ while [ "$#" -gt 0 ]; do
     --max-age-days=*)      MAX_AGE="${1#*=}" ;;
     --no-tmux-rename)      export OPENCODE_RESUME_NO_TMUX_RENAME=1 ;;
     --clear-cache)         set_mode_action clear-cache ;;
+    --print)               set_mode_action print ;; 
     *) positional+=("$1") ;;
   esac
   shift
@@ -1536,6 +1541,9 @@ case "$mode_action" in
     stream_list "$db" "$(pwd -P)" ;;
   delete-marked) delete_sessions "${positional[@]}" ;;
   clear-cache)   clear_cache ;;
+  print)
+    export OPENCODE_RESUME_PRINT_MODE=1
+    main "${positional[@]}" ;;
   rename-session) rename_session "${positional[0]:-}" ;;
   cycle-preview-layout)
     f="${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}"
