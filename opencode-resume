@@ -687,7 +687,7 @@ main() {
   local fzf_header_enter_action="resume"
   [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
   [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]       && fzf_header_enter_action="edit"
-  local fzf_header="Enter: ${fzf_header_enter_action}   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping"
+  local fzf_header="Enter: ${fzf_header_enter_action}   F2/CTRL-R: rename   CTRL-X: delete   CTRL-N: new   CTRL-G: toggle grouping"
   fzf_header="$fzf_header"$'\n''CTRL-S: search   CTRL-T: transcript   CTRL-E: edit   CTRL-F: cycle preview   CTRL-/: layout'
 
   while :; do
@@ -711,7 +711,7 @@ main() {
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
           --bind 'pgup:preview-half-page-up,pgdn:preview-half-page-down' \
           --bind 'enter:accept-non-empty' \
-          --bind 'del:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
+          --bind 'ctrl-x:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
           --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
           < <(stream_list "$db" "$cwd")
     )"; then
@@ -1102,7 +1102,7 @@ main_search() {
   local fzf_header_enter_action="resume"
   [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
   [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]       && fzf_header_enter_action="edit"
-  local fzf_header="Search — Enter: ${fzf_header_enter_action}   DEL: delete   CTRL-R: rename   CTRL-F: toggle preview"
+  local fzf_header="Search — Enter: ${fzf_header_enter_action}   CTRL-X: delete   CTRL-R: rename   CTRL-F: toggle preview"
   fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-C: exit'
 
   while :; do
@@ -1122,7 +1122,7 @@ main_search() {
           --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'enter:accept-non-empty' \
-          --bind 'del:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
+          --bind 'ctrl-x:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
           --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
           < /dev/null
     )"; then
