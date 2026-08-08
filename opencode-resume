@@ -1215,10 +1215,8 @@ rename_session() {
 
   local escaped
   escaped="$(printf '%s' "$title" | sed "s/'/''/g")"
-  local now_ms
-  now_ms="$(date +%s)000"
 
-  sqlite3 "$db" "UPDATE session SET title = '$escaped', time_updated = $now_ms WHERE id = '$sid'" 2>/dev/null || {
+  sqlite3 "$db" "UPDATE session SET title = '$escaped' WHERE id = '$sid'" 2>/dev/null || {
     echo "Failed to rename session." >&2; return 1
   }
 
