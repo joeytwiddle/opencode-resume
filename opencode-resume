@@ -125,6 +125,8 @@ parse_fzf_result() {
 color_reset=''  color_bold=''  color_unbold=''  color_dim=''  color_el=''
 color_cyan=''   color_green=''  color_green_bold=''  color_blue_bold=''  color_yellow_bold=''
 color_red=''    color_red_bold=''  color_white_bold=''  color_meta=''
+color_user=''   color_assistant=''  color_tool_tag=''  color_tool_use=''  color_tool_result=''
+color_skipped=''  color_search_separator=''  color_timestamp=''
 
 init_colors() {
   { want_color && our_styling; } || return 0
@@ -142,9 +144,18 @@ init_colors() {
   color_red_bold=$'\033[1;31m'
   color_white_bold=$'\033[1;37m'
   color_meta="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_META:-38;5;250}")"
+  color_user="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_USER:-48;5;22;97}")"
+  color_assistant="${OPENCODE_RESUME_STYLE_ASSISTANT+$(printf '\033[%sm' "$OPENCODE_RESUME_STYLE_ASSISTANT")}"
+  color_tool_tag="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_TOOL_TAG:-38;5;12}")"
+  color_tool_use="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_TOOL_USE:-38;5;250}")"
+  color_tool_result="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_TOOL_RESULT:-38;5;246}")"
+  color_skipped="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_SKIPPED:-38;5;35}")"
+  color_search_separator="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_SEARCH_SEPARATOR:-1;97;48;5;18}")"
+  color_timestamp="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_TIMESTAMP:-2}")"
 }
 
 our_styling() {
+  case "$OPENCODE_RESUME_TRANSCRIPT_STYLING" in both|chat) ;; *) return 1 ;; esac
   local var key val
   for var in color_cyan color_green color_green_bold color_blue_bold color_yellow_bold color_red color_red_bold color_white_bold color_dim color_meta; do
     key="OPENCODE_RESUME_STYLE_$(printf '%s' "$var" | tr '[:lower:]' '[:upper:]')"
@@ -155,11 +166,11 @@ our_styling() {
 }
 
 bat_styling() {
-  printf '%s' "-l markdown --style=plain --color=always"
+  case "$OPENCODE_RESUME_TRANSCRIPT_STYLING" in both|bat) return 0 ;; *) return 1 ;; esac
 }
 
 render() {
-  if command -v bat >/dev/null 2>&1; then
+  if bat_styling && command -v bat >/dev/null 2>&1; then
     bat -l markdown --style=plain --color=always
   else
     cat
@@ -383,8 +394,8 @@ render_transcript_impl() {
         local srole="${msg_roles[$i]}"
         local sicon=""
         case "$srole" in
-          user)      sicon="${color_green}❯${color_reset}" ;;
-          assistant) sicon="${color_blue_bold}●${color_reset}" ;;
+      user)      sicon="${color_user}❯${color_reset}" ;;
+      assistant) sicon="${color_blue_bold}●${color_reset}" ;;
           *)         sicon=" " ;;
         esac
         local stext="${msg_texts[$i]}"
@@ -397,7 +408,7 @@ render_transcript_impl() {
       fi
     done
     if [ "$shown" -lt "$total_msgs" ]; then
-      printf '%s  … (%d messages hidden) …%s\n' "$color_dim" "$((total_msgs - shown))" "$color_reset"
+      printf '%s  … (%d messages hidden) …%s\n' "$color_skipped" "$((total_msgs - shown))" "$color_reset"
     fi
     return 0
   fi
@@ -417,13 +428,14 @@ render_transcript_impl() {
     local icon label
     case "$mrole" in
       user)
-        icon="${color_green}❯${color_reset}"
-        label="${color_green_bold}User${color_reset}"
+        icon="${color_user}❯${color_reset}"
+        label="${color_user}User${color_reset}"
         [ -n "$magent" ] && label="${label} ${color_dim}(${magent})${color_reset}"
         ;;
       assistant)
         icon="${color_blue_bold}●${color_reset}"
-        label="${color_blue_bold}Assistant${color_reset}"
+        label="Assistant"
+        [ -n "$color_assistant" ] && label="${color_assistant}${label}${color_reset}"
         [ -n "$mmodel" ] && label="${label} ${color_dim}(${mmodel})${color_reset}"
         ;;
       *)
@@ -435,7 +447,7 @@ render_transcript_impl() {
     if [ "$ts_mode" = "true" ] && [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
       local ts
       ts="$(date -d "@$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || date -r "$((mtime / 1000))" '+%H:%M:%S' 2>/dev/null || echo "")"
-      label="${label} ${color_dim}[${ts}]${color_reset}"
+      label="${label} ${color_timestamp}[${ts}]${color_reset}"
     fi
 
     printf '%s %s\n' "$icon" "$label"
@@ -465,12 +477,12 @@ render_transcript_impl() {
           local tcid="${tool_fields[4]}"
           [[ "$tinput" == *"$NL_PLACEHOLDER"* ]] && tinput="$(printf '%s' "$tinput" | sed 's/_NL_/\n/g')"
           [[ "$toutput" == *"$NL_PLACEHOLDER"* ]] && toutput="$(printf '%s' "$toutput" | sed 's/_NL_/\n/g')"
-          local status_color="$color_green"
+          local status_color="$color_tool_tag"
           [ "$tstatus" = "error" ] && status_color="$color_red"
           printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
           if [ -n "$tinput" ] && [ "$tinput" != "null" ]; then
             local input_preview="${tinput:0:300}"
-            printf '    %sInput:%s %s\n' "$color_dim" "$color_reset" "$input_preview"
+            printf '    %sInput:%s %s\n' "$color_tool_use" "$color_reset" "$input_preview"
           fi
           if [ -n "$toutput" ] && [ "$toutput" != "null" ]; then
             local oline ocount=0
@@ -481,11 +493,11 @@ render_transcript_impl() {
               output_preview="$output_preview$oline"
               ocount=$((ocount + 1))
             done <<< "${toutput:0:2000}"
-            printf '    %s── output ──%s\n' "$color_dim" "$color_reset"
+            printf '    %s── output ──%s\n' "$color_tool_result" "$color_reset"
             while IFS= read -r oline; do
               printf '      %s\n' "$oline"
             done <<< "$output_preview"
-            printf '    %s────────────%s\n' "$color_dim" "$color_reset"
+            printf '    %s────────────%s\n' "$color_tool_result" "$color_reset"
           fi
         done
       fi
@@ -526,7 +538,7 @@ transcript_mode() {
   sid="${1:-}"
   [ -z "$sid" ] && { echo "opencode-resume: --transcript needs a session id" >&2; return 1; }
 
-  render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode" "$first_n" "$last_n"
+  render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode" "$first_n" "$last_n" | render
 }
 
 edit_mode() {
@@ -603,7 +615,7 @@ all_transcripts_mode() {
     printf '%s\n' "========================================================================"
     printf '%s[%d/%d] %s — %s%s\n' "$color_bold" "$count" "$(echo "$sessions" | wc -l)" "$title" "$slug" "$color_reset"
     printf '%s\n' "========================================================================"
-    render_transcript_impl "$sid" false false false
+    render_transcript_impl "$sid" false false false | render
     printf '\n\n'
   done <<< "$sessions"
 }
@@ -1004,7 +1016,7 @@ search_list() {
     IFS='|' read -r slug title <<< "$session_info"
     [ -z "$title" ] && title="Untitled"
     [ "$title" = "$slug" ] && title="Untitled"
-    printf '%s\t%s\xc3\x97\t%s\n' "$sid" "$count" "$title"
+    printf '%s\t%s%4d×%s  \t%s\n' "$sid" "$color_yellow_bold" "$count" "$color_reset" "$title"
   done
 
   rm -f "$results_file"
