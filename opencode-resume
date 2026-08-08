@@ -538,6 +538,18 @@ transcript_mode() {
   sid="${1:-}"
   [ -z "$sid" ] && { echo "opencode-resume: --transcript needs a session id" >&2; return 1; }
 
+  if ! validate_sid "$sid"; then
+    local db resolved
+    db="$(get_db_path)" || return 1
+    resolved="$(open_query "$db" "SELECT id FROM session WHERE title = '$sid' OR slug = '$sid' LIMIT 1")"
+    if [ -n "$resolved" ]; then
+      sid="$resolved"
+    else
+      echo "No session found matching: $sid" >&2
+      return 1
+    fi
+  fi
+
   render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode" "$first_n" "$last_n" | render
 }
 
@@ -548,7 +560,12 @@ edit_mode() {
   local db
   db="$(get_db_path)" || return 1
 
-  validate_sid "$sid" || { echo "Invalid session ID: $sid" >&2; return 1; }
+  if ! validate_sid "$sid"; then
+    local resolved
+    resolved="$(open_query "$db" "SELECT id FROM session WHERE title = '$sid' OR slug = '$sid' LIMIT 1")"
+    [ -z "$resolved" ] && { echo "No session found matching: $sid" >&2; return 1; }
+    sid="$resolved"
+  fi
 
   local tmpdir="${TMPDIR:-/tmp}"
   local tmpfile="$tmpdir/opencode-resume-transcript-${sid}.md"
