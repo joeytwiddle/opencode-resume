@@ -1376,7 +1376,12 @@ delete_sessions() {
   case "$reply" in
     ""|y|Y|yes|YES)
       for f in "${files[@]}"; do
-        opencode session delete "$f" 2>/dev/null || true
+        sqlite3 "$db" "DELETE FROM part WHERE session_id = '$f'" 2>/dev/null
+        sqlite3 "$db" "DELETE FROM message WHERE session_id = '$f'" 2>/dev/null
+        sqlite3 "$db" "DELETE FROM session_message WHERE session_id = '$f'" 2>/dev/null
+        sqlite3 "$db" "DELETE FROM session_input WHERE session_id = '$f'" 2>/dev/null
+        sqlite3 "$db" "DELETE FROM session_context_epoch WHERE session_id = '$f'" 2>/dev/null
+        sqlite3 "$db" "DELETE FROM session WHERE id = '$f'" 2>/dev/null
       done
       printf '%sDeleted %d session(s).%s\n' "$color_green" "${#files[@]}" "$color_reset" >&2
       sleep 1
