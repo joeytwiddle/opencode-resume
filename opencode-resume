@@ -736,6 +736,12 @@ main() {
 
   init_picker_state with-group
 
+  # --group/--both: seed the initial grouped state
+  if [ -n "${OPENCODE_RESUME_GROUP_INITIAL:-}" ]; then
+    touch "${OPENCODE_RESUME_GROUP_TOGGLE:-/dev/null}" 2>/dev/null
+    unset OPENCODE_RESUME_GROUP_INITIAL
+  fi
+
   # Preview mode file for cycling transcript view
   OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-preview-mode-XXXXXX")"
   export OPENCODE_RESUME_PREVIEW_MODE_FILE
@@ -1424,7 +1430,7 @@ while [ "$#" -gt 0 ]; do
       sed -nE '/opencode-resume/,/^$/ { /^$/q; s/^# ?//; p; }' "$0"
       exit 0 ;;
     -d|--here|--this)      export OPENCODE_RESUME_MODE="this" ;;
-    -g|--group|--both)     export OPENCODE_RESUME_MODE="both" ;;
+    -g|--group|--both)     export OPENCODE_RESUME_MODE="both"; export OPENCODE_RESUME_GROUP_INITIAL=1 ;;
     --recent)              export OPENCODE_RESUME_MODE="recent" ;;
     --max-sessions)        MAX_SESSIONS="${2:-}"; shift ;;
     --max-sessions=*)      MAX_SESSIONS="${1#*=}" ;;
@@ -1435,6 +1441,12 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# --group/--both seeds the initial grouped state in the picker; reset
+# the base mode to "recent" so CTRL-G can toggle grouping back off.
+if [ "$OPENCODE_RESUME_MODE" = "both" ]; then
+  export OPENCODE_RESUME_MODE="recent"
+fi
 
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 want_color() { [ -n "${FORCE_COLOR:-}" ] && [ "$FORCE_COLOR" != "0" ]; }
