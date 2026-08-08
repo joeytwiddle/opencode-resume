@@ -394,8 +394,8 @@ render_transcript_impl() {
         local srole="${msg_roles[$i]}"
         local sicon=""
         case "$srole" in
-      user)      sicon="${color_user}❯${color_reset}" ;;
-      assistant) sicon="${color_blue_bold}●${color_reset}" ;;
+          user)      sicon="${color_user}❯${color_reset}" ;;
+          assistant) sicon="${color_blue_bold}●${color_reset}" ;;
           *)         sicon=" " ;;
         esac
         local stext="${msg_texts[$i]}"
