@@ -1080,7 +1080,30 @@ search_preview() {
     sep="|"
   done
 
-  GREP_COLOR='07' grep -i -C 2 --color=always -E "$pattern" "$colored" 2>/dev/null || true
+  # Split cache into header (metadata) and body (messages)
+  local header_end
+  header_end="$(grep -n '^\*\*Messages:\*\*' "$colored" 2>/dev/null | head -1 | cut -d: -f1)"
+  if [ -z "$header_end" ]; then
+    GREP_COLOR='07' grep -i -C 2 --color=always -E "$pattern" "$colored" 2>/dev/null || true
+    return 0
+  fi
+  header_end=$((header_end + 2))
+
+  # Always show the metadata header
+  head -n "$header_end" "$colored"
+
+  # Grep only the message body with context
+  local grepped
+  if command -v rg >/dev/null 2>&1; then
+    grepped="$(tail -n +"$((header_end + 1))" "$colored" \
+      | rg --color=always -i -C 2 -e "$pattern" 2>/dev/null || true)"
+  else
+    grepped="$(tail -n +"$((header_end + 1))" "$colored" \
+      | GREP_COLOR='07' grep -i -C 2 --color=always -E "$pattern" 2>/dev/null || true)"
+  fi
+
+  # Style context-gap separators with the search-separator band
+  printf '%s' "$grepped" | sed "s/^--$/${color_search_separator}──${color_reset}/"
 }
 
 main_search() {
