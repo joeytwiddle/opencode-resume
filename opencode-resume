@@ -684,7 +684,10 @@ main() {
   echo conversation > "$OPENCODE_RESUME_PREVIEW_MODE_FILE" 2>/dev/null || true
   trap 'rm -f "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
 
-  local fzf_header='Enter: resume   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping'
+  local fzf_header_enter_action="resume"
+  [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
+  [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]       && fzf_header_enter_action="edit"
+  local fzf_header="Enter: ${fzf_header_enter_action}   F2/CTRL-R: rename   DEL: delete   CTRL-N: new   CTRL-G: toggle grouping"
   fzf_header="$fzf_header"$'\n''CTRL-S: search   CTRL-T: transcript   CTRL-E: edit   CTRL-F: cycle preview   CTRL-/: layout'
 
   while :; do
@@ -721,7 +724,13 @@ main() {
 
     local target="${session_ids[${#session_ids[@]} - 1]}"
     rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE" "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
-    resume_session "$db" "$target"
+    if [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
+      "$0" --transcript --full "$target" | command less -R
+    elif [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]; then
+      "$0" --edit "$target"
+    else
+      resume_session "$db" "$target"
+    fi
     break
   done
 }
@@ -1090,7 +1099,10 @@ main_search() {
 
   trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
 
-  local fzf_header='Enter: resume   DEL: delete   CTRL-R: rename   CTRL-F: toggle preview'
+  local fzf_header_enter_action="resume"
+  [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
+  [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]       && fzf_header_enter_action="edit"
+  local fzf_header="Search — Enter: ${fzf_header_enter_action}   DEL: delete   CTRL-R: rename   CTRL-F: toggle preview"
   fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-C: exit'
 
   while :; do
@@ -1123,7 +1135,13 @@ main_search() {
 
     local target="${session_ids[${#session_ids[@]} - 1]}"
     rm -f "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
-    resume_session "$db" "$target"
+    if [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
+      "$0" --transcript --full "$target" | command less -R
+    elif [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]; then
+      "$0" --edit "$target"
+    else
+      resume_session "$db" "$target"
+    fi
     break
   done
 }
@@ -1259,6 +1277,19 @@ mode_action=""
 
 set_mode_action() {
   if [ -n "$mode_action" ] && [ "$mode_action" != "$1" ]; then
+    # -a overrides -t in either order; -t -a is the common short form -at/-ta.
+    if { [ "$mode_action" = "all-transcripts" ] && [ "$1" = "transcript" ]; } \
+    || { [ "$mode_action" = "transcript" ]      && [ "$1" = "all-transcripts" ]; }; then
+      mode_action="all-transcripts"
+      return
+    fi
+    # -t + -S → search picker with transcript-on-enter
+    if { [ "$mode_action" = "transcript" ] && [ "$1" = "search" ]; } \
+    || { [ "$mode_action" = "search" ]      && [ "$1" = "transcript" ]; }; then
+      export OPENCODE_RESUME_TRANSCRIPT_PICKER=1
+      mode_action="search"
+      return
+    fi
     echo "opencode-resume: conflicting modes: --$mode_action and --$1" >&2
     exit 2
   fi
@@ -1326,11 +1357,21 @@ init_colors
 case "$mode_action" in
   preview)      preview_session "${positional[0]:-}" ;;
   transcript)
-    [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --transcript needs a session id" >&2; exit 2; }
-    transcript_mode "${positional[@]}" ;;
+    if [ -n "${positional[0]:-}" ]; then
+      transcript_mode "${positional[@]}"
+    else
+      export OPENCODE_RESUME_TRANSCRIPT_PICKER=1
+      main "${positional[@]}"
+    fi
+    ;;
   edit)
-    [ -z "${positional[0]:-}" ] && { echo "opencode-resume: --edit needs a session id" >&2; exit 2; }
-    edit_mode "${positional[0]}" ;;
+    if [ -n "${positional[0]:-}" ]; then
+      edit_mode "${positional[0]}"
+    else
+      export OPENCODE_RESUME_EDIT_PICKER=1
+      main "${positional[@]}"
+    fi
+    ;;
   all-transcripts)
     all_transcripts_mode "${positional[0]:-}" ;;
   resume)
