@@ -705,7 +705,7 @@ main() {
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
-          --bind 'ctrl-s:execute(opencode-resume --search)' \
+          --bind 'ctrl-s:execute(opencode-resume --search {q})' \
           --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
