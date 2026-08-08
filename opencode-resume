@@ -759,6 +759,7 @@ main() {
     local out
     if ! out="$(
       fzf --ansi \
+          --no-hscroll \
           --with-nth=2.. \
           --delimiter=$'\t' \
           --no-sort \
@@ -1256,6 +1257,7 @@ main_search() {
     local out
     if ! out="$(
       fzf --ansi \
+          --no-hscroll \
           --disabled \
           --with-nth=2.. \
           --delimiter=$'\t' \
