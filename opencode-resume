@@ -1025,12 +1025,15 @@ search_cache_dir() {
 }
 
 search_session_cache() {
-  local sid="$1"
+  local sid="$1" full_mode="${2:-false}"
   local cache_dir
   cache_dir="$(search_cache_dir)"
 
-  local plain="$cache_dir/transcript-${sid}.txt"
-  local colored="$cache_dir/transcript-${sid}.color.txt"
+  local mode_tag="conv"
+  [ "$full_mode" = "true" ] && mode_tag="full"
+
+  local plain="$cache_dir/transcript-${sid}_${mode_tag}.txt"
+  local colored="$cache_dir/transcript-${sid}_${mode_tag}.color.txt"
 
   local db
   db="$(get_db_path)" || return 1
@@ -1045,7 +1048,7 @@ search_session_cache() {
     [ "$cache_mtime" -gt "$session_mtime" ] 2>/dev/null && { printf '%s\t%s' "$plain" "$colored"; return 0; }
   fi
 
-  render_transcript_impl "$sid" false false false > "$colored" 2>/dev/null
+  render_transcript_impl "$sid" false "$full_mode" false > "$colored" 2>/dev/null
   sed 's/\x1b\[[0-9;]*m//g' "$colored" > "$plain" 2>/dev/null
 
   printf '%s\t%s' "$plain" "$colored"
@@ -1056,8 +1059,13 @@ search_count_one() {
   shift
   [ $# -eq 0 ] && return 0
 
+  # Read current preview mode to decide conversation vs full
+  local search_mode full_mode=false
+  search_mode="$(cat "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-/dev/null}" 2>/dev/null || true)"
+  [ "$search_mode" = "full" ] && full_mode=true
+
   local cache_paths
-  cache_paths="$(search_session_cache "$sid")" || return 0
+  cache_paths="$(search_session_cache "$sid" "$full_mode")" || return 0
   local plain colored
   IFS=$'\t' read -r plain colored <<< "$cache_paths"
 
@@ -1124,8 +1132,12 @@ search_preview() {
 
   local query="$*"
 
+  local search_mode full_mode=false
+  search_mode="$(cat "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-/dev/null}" 2>/dev/null || true)"
+  [ "$search_mode" = "full" ] && full_mode=true
+
   local cache_paths
-  cache_paths="$(search_session_cache "$sid")" || return 0
+  cache_paths="$(search_session_cache "$sid" "$full_mode")" || return 0
   local plain colored
   IFS=$'\t' read -r plain colored <<< "$cache_paths"
 
@@ -1212,7 +1224,7 @@ main_search() {
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind "start:reload:opencode-resume --search-list+change:reload:sleep \"\${OPENCODE_RESUME_SEARCH_DEBOUNCE:-0.25}\"; opencode-resume --search-list {q}" \
           --bind 'ctrl-s:abort' \
-          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+refresh-preview' \
+          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+reload(opencode-resume --search-list {q})+refresh-preview' \
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'enter:accept-non-empty' \
