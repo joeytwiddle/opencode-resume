@@ -1017,6 +1017,25 @@ preview_session() {
 # Search mode
 # ──────────────────────────────────────────────
 
+clear_cache() {
+  local cache_dir
+  cache_dir="$(search_cache_dir 2>/dev/null || echo "${TMPDIR:-/tmp}/opencode-resume/search-cache")"
+  local preview_cache="${TMPDIR:-/tmp}/opencode-resume/preview-cache"
+  local count=0
+  for d in "$cache_dir" "$preview_cache"; do
+    if [ -d "$d" ]; then
+      local n=0
+      find "$d" -type f 2>/dev/null | while IFS= read -r f; do
+        n=$((n + 1))
+      done
+      rm -rf "$d" 2>/dev/null
+      count=$((count + 1))
+    fi
+  done
+  mkdir -p "$cache_dir" "$preview_cache" 2>/dev/null
+  printf 'Cleared search and transcript caches.\n' >&2
+}
+
 # Split a search query into terms, one per line. Whitespace-separated, but
 # text inside double quotes stays together as one phrase term (quotes stripped).
 tokenize_query() {
@@ -1469,6 +1488,7 @@ while [ "$#" -gt 0 ]; do
     --max-age-days)        MAX_AGE="${2:-}"; shift ;;
     --max-age-days=*)      MAX_AGE="${1#*=}" ;;
     --no-tmux-rename)      export OPENCODE_RESUME_NO_TMUX_RENAME=1 ;;
+    --clear-cache)         set_mode_action clear-cache ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -1515,6 +1535,7 @@ case "$mode_action" in
     db="$(get_db_path)" || exit 1
     stream_list "$db" "$(pwd -P)" ;;
   delete-marked) delete_sessions "${positional[@]}" ;;
+  clear-cache)   clear_cache ;;
   rename-session) rename_session "${positional[0]:-}" ;;
   cycle-preview-layout)
     f="${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}"
