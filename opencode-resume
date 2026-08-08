@@ -618,7 +618,8 @@ all_transcripts_mode() {
 
   local sessions
   if [ -n "$filter" ]; then
-    sessions="$(open_query "$db" "SELECT id, slug, title FROM session WHERE id LIKE '%$filter%' OR slug LIKE '%$filter%' OR title LIKE '%$filter%' ORDER BY time_updated DESC")"
+    sessions="$(open_query "$db" "SELECT id, slug, title FROM session ORDER BY time_updated DESC")"
+    sessions="$(printf '%s\n' "$sessions" | grep -E -i "$filter" || true)"
   else
     sessions="$(open_query "$db" "SELECT id, slug, title FROM session ORDER BY time_updated DESC")"
   fi
