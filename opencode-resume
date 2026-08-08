@@ -706,7 +706,7 @@ main() {
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
           --bind 'ctrl-s:execute(opencode-resume --search {q})' \
-          --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
+          --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
           --bind 'pgup:preview-half-page-up,pgdn:preview-half-page-down' \
@@ -725,7 +725,7 @@ main() {
     local target="${session_ids[${#session_ids[@]} - 1]}"
     rm -f "$OPENCODE_RESUME_PREVIEW_LAYOUT_FILE" "$OPENCODE_RESUME_GROUP_TOGGLE" "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
     if [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
-      "$0" --transcript --full "$target" | command less -R
+      "$0" --transcript --full "$target" | command less -RX
     elif [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]; then
       "$0" --edit "$target"
     else
@@ -1118,8 +1118,8 @@ main_search() {
           --preview 'opencode-resume --search-preview {1} {q}' \
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'start:reload:opencode-resume --search-list+change:reload:opencode-resume --search-list {q}' \
-          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)' \
-          --bind 'ctrl-t:execute-silent(opencode-resume --transcript --full {1} | command less -R)' \
+          --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+refresh-preview' \
+          --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'enter:accept-non-empty' \
           --bind 'ctrl-x:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
@@ -1136,7 +1136,7 @@ main_search() {
     local target="${session_ids[${#session_ids[@]} - 1]}"
     rm -f "$OPENCODE_RESUME_PREVIEW_MODE_FILE"
     if [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ]; then
-      "$0" --transcript --full "$target" | command less -R
+      "$0" --transcript --full "$target" | command less -RX
     elif [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]; then
       "$0" --edit "$target"
     else
