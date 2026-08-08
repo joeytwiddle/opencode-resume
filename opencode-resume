@@ -91,15 +91,17 @@ bullet=$'  \u2022  '
 
 init_picker_state() {
   OPENCODE_RESUME_PREVIEW_LAYOUT_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-layout-XXXXXX")"
+  OPENCODE_RESUME_RELOAD_POS="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-reloadpos-XXXXXX")"
   export OPENCODE_RESUME_LIST_WITH_SID=1
+  export OPENCODE_RESUME_RELOAD_POS
   export FORCE_COLOR="${FORCE_COLOR:-1}"
   if [ -n "${1:-}" ]; then
     OPENCODE_RESUME_GROUP_TOGGLE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-group-XXXXXX")"
     export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE OPENCODE_RESUME_GROUP_TOGGLE
-    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}"' EXIT
+    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"' EXIT
   else
     export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE
-    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}"' EXIT
+    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"' EXIT
   fi
 }
 
@@ -115,8 +117,9 @@ parse_fzf_result() {
   done < <(printf '%s\n' "$out" | tail -n +2)
 
   if [ "$CR_FZF_KEY" = "ctrl-n" ]; then
-    rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}"
+    rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"
     unset OPENCODE_RESUME_PREVIEW_LAYOUT_FILE OPENCODE_RESUME_GROUP_TOGGLE \
+          OPENCODE_RESUME_RELOAD_POS \
           OPENCODE_RESUME_LIST_WITH_SID
     exec opencode
   fi
@@ -760,15 +763,17 @@ main() {
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
-          --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload-sync(opencode-resume --list)' \
+          --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload(opencode-resume --list)' \
           --bind 'ctrl-s:execute(opencode-resume --search {q})' \
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
           --bind 'pgup:preview-half-page-up,pgdn:preview-half-page-down' \
           --bind 'enter:accept-non-empty' \
-          --bind 'ctrl-x:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
-          --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --list)+pos($((N+1)))"' \
+          --bind 'ctrl-x:transform:echo "execute(opencode-resume --delete-marked {+1})+clear-selection+execute-silent(printf %s \"pos:$FZF_POS\" > \"$OPENCODE_RESUME_RELOAD_POS\")+reload(opencode-resume --list)"' \
+          --bind 'ctrl-r,f2:transform:echo "execute(opencode-resume --rename-session {1})+execute-silent(printf %s \"pos:$FZF_POS\" > \"$OPENCODE_RESUME_RELOAD_POS\")+reload(opencode-resume --list)"' \
+          --bind 'result:transform:s=$(cat "$OPENCODE_RESUME_RELOAD_POS" 2>/dev/null || true); case "$s" in pos:*) n=${s#pos:}; c=${FZF_MATCH_COUNT:-0}; if [ "$c" -ge "$n" ]; then : > "$OPENCODE_RESUME_RELOAD_POS"; echo "pos($n)"; elif [ "$c" -ge 1 ]; then echo "pos($c)"; fi ;; esac' \
+          --bind 'load:transform:s=$(cat "$OPENCODE_RESUME_RELOAD_POS" 2>/dev/null || true); case "$s" in pos:*) : > "$OPENCODE_RESUME_RELOAD_POS"; echo "pos(${s#pos:})";; esac' \
           < <(stream_list "$db" "$cwd")
     )"; then
       return 0
@@ -1204,8 +1209,10 @@ main_search() {
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'enter:accept-non-empty' \
-          --bind 'ctrl-x:transform:N={n}; echo "execute(opencode-resume --delete-marked {+1})+clear-selection+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
-          --bind 'ctrl-r,f2:transform:N={n}; echo "execute(opencode-resume --rename-session {1})+reload-sync(opencode-resume --search-list {q})+pos($((N+1)))"' \
+          --bind 'ctrl-x:transform:echo "execute(opencode-resume --delete-marked {+1})+clear-selection+execute-silent(printf %s \"pos:$FZF_POS\" > \"$OPENCODE_RESUME_RELOAD_POS\")+reload(opencode-resume --search-list {q})"' \
+          --bind 'ctrl-r,f2:transform:echo "execute(opencode-resume --rename-session {1})+execute-silent(printf %s \"pos:$FZF_POS\" > \"$OPENCODE_RESUME_RELOAD_POS\")+reload(opencode-resume --search-list {q})"' \
+          --bind 'result:transform:s=$(cat "$OPENCODE_RESUME_RELOAD_POS" 2>/dev/null || true); case "$s" in pos:*) n=${s#pos:}; c=${FZF_MATCH_COUNT:-0}; if [ "$c" -ge "$n" ]; then : > "$OPENCODE_RESUME_RELOAD_POS"; echo "pos($n)"; elif [ "$c" -ge 1 ]; then echo "pos($c)"; fi ;; esac' \
+          --bind 'load:transform:s=$(cat "$OPENCODE_RESUME_RELOAD_POS" 2>/dev/null || true); case "$s" in pos:*) : > "$OPENCODE_RESUME_RELOAD_POS"; echo "pos(${s#pos:})";; esac' \
           < /dev/null
     )"; then
       return 0
@@ -1251,6 +1258,7 @@ resume_session() {
   printf '+ opencode -s %s\n' "$sid" >&2
   env -u OPENCODE_RESUME_PREVIEW_LAYOUT_FILE \
       -u OPENCODE_RESUME_GROUP_TOGGLE \
+      -u OPENCODE_RESUME_RELOAD_POS \
       -u OPENCODE_RESUME_LIST_WITH_SID \
       opencode -s "$sid"
 }
