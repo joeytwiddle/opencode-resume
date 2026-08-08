@@ -4,16 +4,25 @@
 # opencode-resume — an fzf picker for opencode sessions from any folder.
 #
 # Browse your recent opencode sessions in a fuzzy-searchable list, preview the
-# session metadata, then hit Enter to resume one with `opencode -s <id>`. You
-# can also rename or delete sessions inline.
+# conversation in the side pane, then hit Enter to resume one with
+# `opencode -s <id>`. You can also rename or delete sessions inline, and
+# search and view full transcripts.
 #
 # Usage: opencode-resume [flags] [mode] [search query]
 #
 # MODES
-#   (default)                  Open the interactive fzf picker — browse,
+#   (default)                  Open the interactive fzf picker — browse, search,
 #                              preview, resume, rename, and delete sessions
+#   -S, --search [<terms>]     Shows only sessions where the provided terms
+#                              appear in the transcript.
+#   -t, --transcript           View selected transcript instead of resuming
+#   -t, --transcript <id|name> View the transcript for the given session
+#   -a, --all-transcripts [r]  Dump transcripts for all sessions
+#                              With regex, filters session list by name/dir/etc
+#   -e, --edit                 Open selected transcript instead of resuming
+#   -e, --edit <id|name>       Open transcript; prompts for editor (or saved default)
+#   -r, --resume <id|name|t>   Resume directly by sid, exact name, or search term
 #   -l, --list                 Just print the list of sessions
-#   -r, --resume <id|name>     Resume directly by sid or exact title
 #
 # WHICH SESSIONS TO LIST
 #   --recent (default)         Most recent sessions across every folder, flat
@@ -25,9 +34,29 @@
 # RESUME OPTIONS
 #   --no-tmux-rename           Don't rename the tmux window to the session title
 #
+# TRANSCRIPT DETAIL
+#   (default)                  All messages, full bodies, no tool blocks
+#   --short                    Compact: first N + last N, one line each
+#   --first N                  (with --short) First N messages shown (default 15)
+#   --last N                   (with --short) Last N messages shown (default 15)
+#   --with-tools, --full, -f   (without --short) Include tool_use / tool_results
+#   -T, --timestamps           Show timestamp before each message
+#   --transcript-style <mode>  Sets which colour styling is applied to transcripts
+#                              Modes: both (default) | chat | bat | none
+#
+# STYLING (environment variables)
+#   OPENCODE_RESUME_TRANSCRIPT_STYLING   as above: both (default) | chat | bat | none
+#   You can customise colours for each role as ANSI body (between "\033[" and "m")
+#   OPENCODE_RESUME_STYLE_META           OPENCODE_RESUME_STYLE_TIMESTAMP
+#   OPENCODE_RESUME_STYLE_USER           OPENCODE_RESUME_STYLE_ASSISTANT
+#   OPENCODE_RESUME_STYLE_TOOL_TAG       OPENCODE_RESUME_STYLE_TOOL_USE
+#   OPENCODE_RESUME_STYLE_TOOL_RESULT    OPENCODE_RESUME_STYLE_SKIPPED
+#   OPENCODE_RESUME_STYLE_SEARCH_SEPARATOR
+#
 # CONFIG FILE
 #   ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-resume/config
-#   Sourced bash file. Put env var overrides there.
+#   Sourced bash file. Put OPENCODE_RESUME_STYLE_* or other env var overrides
+#   there instead of .bashrc. CLI flags still take precedence.
 #
 # EXAMPLES
 #   opencode-resume              # most-recent across all folders
@@ -35,6 +64,9 @@
 #   opencode-resume --both       # grouped listing
 #   opencode-resume -l           # plain list
 #   opencode-resume -r ses_xxx   # resume directly
+#   opencode-resume -tfT sess2   # dump transcript including tools and times
+#   opencode-resume -a foo       # dump all transcripts with "foo" in title/dir
+#   opencode-resume -S bar baz   # search for sessions mentioning "bar" and "baz"
 
 set -euo pipefail
 
