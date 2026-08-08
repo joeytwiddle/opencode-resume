@@ -1181,7 +1181,7 @@ main_search() {
   [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
   [ -n "${OPENCODE_RESUME_EDIT_PICKER:-}" ]       && fzf_header_enter_action="edit"
   local fzf_header="Search — Enter: ${fzf_header_enter_action}   CTRL-X: delete   CTRL-R: rename   CTRL-F: toggle preview"
-  fzf_header="$fzf_header"$'\n''CTRL-T: transcript   CTRL-E: edit   CTRL-C: exit'
+  fzf_header="$fzf_header"$'\n''CTRL-S: back to picker   CTRL-T: transcript   CTRL-E: edit'
 
   while :; do
     local out
@@ -1197,6 +1197,7 @@ main_search() {
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'start:reload:opencode-resume --search-list+change:reload:opencode-resume --search-list {q}' \
+          --bind 'ctrl-s:abort' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+refresh-preview' \
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
