@@ -553,6 +553,16 @@ transcript_mode() {
   render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode" "$first_n" "$last_n" | render
 }
 
+launch_editor() {
+  local editor="$1" file="$2"
+  case "$editor" in
+    open) open "$file" 2>/dev/null ;;
+    open\ -a\ *) $editor "$file" 2>/dev/null ;;
+    xdg-open) xdg-open "$file" 2>/dev/null ;;
+    *) $editor "$file" </dev/tty >/dev/tty 2>&1 ;;
+  esac
+}
+
 edit_mode() {
   local sid="$1"
   [ -z "$sid" ] && { echo "opencode-resume: --edit needs a session id" >&2; return 1; }
@@ -567,45 +577,72 @@ edit_mode() {
     sid="$resolved"
   fi
 
-  local tmpdir="${TMPDIR:-/tmp}"
-  local tmpfile="$tmpdir/opencode-resume-transcript-${sid}.md"
+  local title
+  title="$(open_query "$db" "SELECT COALESCE(title, '') FROM session WHERE id = '$sid'")" || title=""
 
-  render_transcript_impl "$sid" false false false > "$tmpfile" 2>/dev/null
-  [ ! -f "$tmpfile" ] && { echo "Failed to render transcript" >&2; return 1; }
+  local safe_title
+  safe_title="$(printf '%s' "$title" | sed -E 's/[^[:alnum:]._-]+/-/g' | head -c 60)"
+  [ -z "$safe_title" ] && safe_title="session"
+  local short_sid="${sid:0:12}"
+  local editdir="${XDG_DATA_HOME:-$HOME/.local/share}/opencode-resume/editor"
+  mkdir -p "$editdir" 2>/dev/null
+  local tmpfile="$editdir/${safe_title}-${short_sid}.md"
+
+  # Background render while user is at the editor prompt
+  render_transcript_impl "$sid" false false false > "$tmpfile" 2>/dev/null &
+
+  # Non-TTY fallback: $EDITOR -> $VISUAL -> vi
+  if [ ! -t 0 ]; then
+    wait
+    [ ! -s "$tmpfile" ] && { echo "Failed to render transcript" >&2; return 1; }
+    local editor="${EDITOR:-${VISUAL:-vi}}"
+    launch_editor "$editor" "$tmpfile" || {
+      echo "Failed to open editor '$editor'" >&2
+      return 1
+    }
+    return 0
+  fi
 
   # Read editor preference
   local editor_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode-resume/editor"
   local chosen_editor=""
   [ -f "$editor_config" ] && chosen_editor="$(cat "$editor_config")"
 
+  # Build shortcut table (customizable via env var)
+  local shortcuts
+  shortcuts="${OPENCODE_RESUME_EDITOR_SHORTCUTS:-o:xdg-open,c:code,n:nvim,v:vim,m:micro,e:emacs,b:breeze}"
+
   if [ -z "$chosen_editor" ]; then
     printf '\n%sChoose editor:%s\n' "$color_bold" "$color_reset"
-    printf '  %so%s = xdg-open  %sc%s = code  %sn%s = nvim  %sv%s = vim\n' \
-      "$color_green" "$color_reset" "$color_green" "$color_reset" \
-      "$color_green" "$color_reset" "$color_green" "$color_reset"
-    printf '  %sm%s = micro  %se%s = emacs  %sb%s = breeze\n' \
-      "$color_green" "$color_reset" "$color_green" "$color_reset" "$color_green" "$color_reset"
-    printf 'Editor shortcut [%so%s]: ' "$color_green" "$color_reset"
+    local IFS=','
+    for entry in $shortcuts; do
+      local key="${entry%%:*}" cmd="${entry#*:}"
+      printf '  %s%s%s = %s  ' "$color_green" "$key" "$color_reset" "$cmd"
+    done
+    printf '\nEditor shortcut: '
     local reply
     IFS= read -r reply </dev/tty || reply=""
     reply="${reply:-o}"
-    case "$reply" in
-      o) chosen_editor="xdg-open" ;;
-      c) chosen_editor="code" ;;
-      n) chosen_editor="nvim" ;;
-      v) chosen_editor="vim" ;;
-      m) chosen_editor="micro" ;;
-      e) chosen_editor="emacs" ;;
-      b) chosen_editor="breeze" ;;
-      *) echo "Unknown editor: $reply, falling back to xdg-open" >&2; chosen_editor="xdg-open" ;;
-    esac
+    chosen_editor=""
+    local IFS=','
+    for entry in $shortcuts; do
+      local key="${entry%%:*}" cmd="${entry#*:}"
+      [ "$reply" = "$key" ] && { chosen_editor="$cmd"; break; }
+    done
+    if [ -z "$chosen_editor" ]; then
+      # Single-char not in table — treat as full command
+      chosen_editor="$reply"
+    fi
     mkdir -p "$(dirname "$editor_config")" 2>/dev/null
     printf '%s' "$chosen_editor" > "$editor_config"
     printf '%sEditor preference saved to %s%s\n' "$color_dim" "$editor_config" "$color_reset" >&2
   fi
 
+  wait
+  [ ! -s "$tmpfile" ] && { echo "Failed to render transcript" >&2; return 1; }
+
   printf '%sOpening transcript in %s...%s\n' "$color_dim" "$chosen_editor" "$color_reset" >&2
-  $chosen_editor "$tmpfile" </dev/tty >/dev/tty 2>&1 || {
+  launch_editor "$chosen_editor" "$tmpfile" || {
     echo "Failed to open editor '$chosen_editor'" >&2
     return 1
   }
