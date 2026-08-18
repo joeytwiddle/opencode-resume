@@ -91,31 +91,30 @@ ellipsis=$'\u2026'
 bullet=$'  \u2022  '
 
 init_picker_state() {
-  OPENCODE_RESUME_PREVIEW_LAYOUT_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-layout-XXXXXX")"
-  OPENCODE_RESUME_RELOAD_POS="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-reloadpos-XXXXXX")"
+  [ -n "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" ] || OPENCODE_RESUME_PREVIEW_LAYOUT_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-layout-XXXXXX")"
+  [ -n "${OPENCODE_RESUME_RELOAD_POS:-}" ] || OPENCODE_RESUME_RELOAD_POS="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-reloadpos-XXXXXX")"
   export OPENCODE_RESUME_LIST_WITH_SID=1
   export OPENCODE_RESUME_RELOAD_POS
   export FORCE_COLOR="${FORCE_COLOR:-1}"
   if [ -n "${1:-}" ]; then
-    OPENCODE_RESUME_GROUP_TOGGLE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-group-XXXXXX")"
+    [ -n "${OPENCODE_RESUME_GROUP_TOGGLE:-}" ] || OPENCODE_RESUME_GROUP_TOGGLE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-group-XXXXXX")"
     export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE OPENCODE_RESUME_GROUP_TOGGLE
-    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"' EXIT
   else
     export OPENCODE_RESUME_PREVIEW_LAYOUT_FILE
-    trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"' EXIT
   fi
 }
 
 parse_fzf_result() {
   local out="$1"
-  CR_FZF_KEY="$(printf '%s\n' "$out" | sed -n '1p')"
+  CR_FZF_QUERY="$(printf '%s\n' "$out" | sed -n '1p')"
+  CR_FZF_KEY="$(printf '%s\n' "$out" | sed -n '2p')"
   CR_FZF_SESSION_IDS=()
   local line sid
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     sid="$(printf '%s' "$line" | cut -f1)"
     [ -n "$sid" ] && CR_FZF_SESSION_IDS+=("$sid")
-  done < <(printf '%s\n' "$out" | tail -n +2)
+  done < <(printf '%s\n' "$out" | tail -n +3)
 
   if [ "$CR_FZF_KEY" = "ctrl-n" ]; then
     rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}"
@@ -124,6 +123,30 @@ parse_fzf_result() {
           OPENCODE_RESUME_LIST_WITH_SID
     exec opencode
   fi
+}
+
+# Relay toggles between the normal picker and the search picker without
+# spawning child processes: CTRL-S/ALT-S flips mode and keeps the query,
+# while ESC/CTRL-C (fzf non-zero exit) breaks the loop and exits the script.
+# State files are created once and reused across toggles; the EXIT trap here
+# owns cleanup so nothing leaks when modes flip repeatedly.
+run_picker_loop() {
+  local mode="$1"
+  shift
+  local query="${*:-}"
+  trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_GROUP_TOGGLE:-}" "${OPENCODE_RESUME_RELOAD_POS:-}" "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
+  while :; do
+    CR_SWITCH_TO=""
+    CR_SWITCH_QUERY=""
+    if [ "$mode" = "search" ]; then
+      main_search "$query"
+    else
+      main "$query"
+    fi
+    [ -z "${CR_SWITCH_TO:-}" ] && break
+    mode="$CR_SWITCH_TO"
+    query="${CR_SWITCH_QUERY:-}"
+  done
 }
 
 color_reset=''  color_bold=''  color_unbold=''  color_dim=''  color_el=''
@@ -798,10 +821,9 @@ main() {
   fi
 
   # Preview mode file for cycling transcript view
-  OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-preview-mode-XXXXXX")"
+  [ -n "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}" ] || OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-preview-mode-XXXXXX")"
   export OPENCODE_RESUME_PREVIEW_MODE_FILE
   echo conversation > "$OPENCODE_RESUME_PREVIEW_MODE_FILE" 2>/dev/null || true
-  trap 'rm -f "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
 
   local fzf_header_enter_action="resume"
   [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
@@ -819,15 +841,15 @@ main() {
           --delimiter=$'\t' \
           --no-sort \
           --multi \
+          --print-query \
           --query="$query" \
-          --expect=ctrl-n \
+          --expect=ctrl-n,ctrl-s,alt-s \
           --header="$fzf_header" \
           --preview 'opencode-resume --preview {1}' \
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'ctrl-/:transform:echo "change-preview-window:$(opencode-resume --cycle-preview-layout)"' \
           --bind 'ctrl-g:execute-silent(if [ -f "$OPENCODE_RESUME_GROUP_TOGGLE" ]; then rm -f "$OPENCODE_RESUME_GROUP_TOGGLE"; else touch "$OPENCODE_RESUME_GROUP_TOGGLE"; fi)+reload(opencode-resume --list)' \
-          --bind 'ctrl-s:execute(opencode-resume --search {q})' \
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+change-preview(opencode-resume --preview {1})' \
@@ -843,6 +865,11 @@ main() {
     fi
 
     parse_fzf_result "$out"
+    if [ "$CR_FZF_KEY" = "ctrl-s" ] || [ "$CR_FZF_KEY" = "alt-s" ]; then
+      CR_SWITCH_TO="search"
+      CR_SWITCH_QUERY="${CR_FZF_QUERY:-}"
+      return 0
+    fi
     local session_ids=("${CR_FZF_SESSION_IDS[@]+"${CR_FZF_SESSION_IDS[@]}"}")
     [ "${#session_ids[@]}" -eq 0 ] && return 0
 
@@ -1310,11 +1337,9 @@ main_search() {
 
   init_picker_state
 
-  OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-search-preview-mode-XXXXXX")"
+  [ -n "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}" ] || OPENCODE_RESUME_PREVIEW_MODE_FILE="$(mktemp -u "${TMPDIR:-/tmp}/opencode-resume-search-preview-mode-XXXXXX")"
   export OPENCODE_RESUME_PREVIEW_MODE_FILE
   echo "full" > "$OPENCODE_RESUME_PREVIEW_MODE_FILE" 2>/dev/null || true
-
-  trap 'rm -f "${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-}" "${OPENCODE_RESUME_PREVIEW_MODE_FILE:-}"' EXIT
 
   local fzf_header_enter_action="resume"
   [ -n "${OPENCODE_RESUME_TRANSCRIPT_PICKER:-}" ] && fzf_header_enter_action="transcript"
@@ -1332,14 +1357,15 @@ main_search() {
           --with-nth=2.. \
           --delimiter=$'\t' \
           --no-sort \
+          --print-query \
           --query="$query" \
+          --expect=ctrl-s,alt-s \
           --header="$fzf_header" \
           --preview 'opencode-resume --search-preview {1} {q}' \
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
           --bind 'start:reload:opencode-resume --search-list {q}' \
           --bind "change:reload:sleep \"\${OPENCODE_RESUME_SEARCH_DEBOUNCE:-0.25}\"; opencode-resume --search-list {q}" \
-          --bind 'ctrl-s:abort' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+reload(opencode-resume --search-list {q})+refresh-preview' \
           --bind 'ctrl-t:execute(opencode-resume --transcript --full {1} | command less -RX)' \
           --bind 'ctrl-e:execute-silent(opencode-resume --edit {1})' \
@@ -1354,6 +1380,11 @@ main_search() {
     fi
 
     parse_fzf_result "$out"
+    if [ "$CR_FZF_KEY" = "ctrl-s" ] || [ "$CR_FZF_KEY" = "alt-s" ]; then
+      CR_SWITCH_TO="normal"
+      CR_SWITCH_QUERY="${CR_FZF_QUERY:-}"
+      return 0
+    fi
     local session_ids=("${CR_FZF_SESSION_IDS[@]+"${CR_FZF_SESSION_IDS[@]}"}")
     [ "${#session_ids[@]}" -eq 0 ] && return 0
 
@@ -1598,7 +1629,7 @@ case "$mode_action" in
       transcript_mode "${positional[@]}"
     else
       export OPENCODE_RESUME_TRANSCRIPT_PICKER=1
-      main "${positional[@]}"
+      run_picker_loop normal "${positional[@]}"
     fi
     ;;
   edit)
@@ -1606,7 +1637,7 @@ case "$mode_action" in
       edit_mode "${positional[0]}"
     else
       export OPENCODE_RESUME_EDIT_PICKER=1
-      main "${positional[@]}"
+      run_picker_loop normal "${positional[@]}"
     fi
     ;;
   all-transcripts)
@@ -1621,7 +1652,7 @@ case "$mode_action" in
   clear-cache)   clear_cache ;;
   print)
     export OPENCODE_RESUME_PRINT_MODE=1
-    main "${positional[@]}" ;;
+    run_picker_loop normal "${positional[@]}" ;;
   rename-session) rename_session "${positional[0]:-}" ;;
   cycle-preview-layout)
     f="${OPENCODE_RESUME_PREVIEW_LAYOUT_FILE:-/dev/null}"
@@ -1638,11 +1669,11 @@ case "$mode_action" in
     preview_mode_spec ;;
   print-preview-mode)
     preview_mode_spec ;;
-  search)           main_search "${positional[@]}" ;;
+  search)           run_picker_loop search "${positional[@]}" ;;
   search-list)      search_list "${positional[@]}" ;;
   search-preview)   search_preview "${positional[@]}" ;;
   search-count)
     [ "${#positional[@]}" -lt 2 ] && { echo "opencode-resume: --search-count needs a session id and terms" >&2; exit 2; }
     search_count_one "${positional[@]}" ;;
-  "") main "${positional[@]}" ;;
+  "") run_picker_loop normal "${positional[@]}" ;;
 esac
