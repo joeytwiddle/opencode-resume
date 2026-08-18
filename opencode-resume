@@ -716,6 +716,45 @@ open_query() {
   sqlite3 "$db" "$query" 2>/dev/null
 }
 
+# Check if two directory paths refer to the same directory.
+# First tries exact string match (fast), then falls back to realpath comparison
+# if realpath is available. Caches the realpath of CWD to avoid recalculating.
+is_same_directory() {
+  local dir1="$1" dir2="$2"
+  
+  # Fast path: exact string match
+  [ "$dir1" = "$dir2" ] && return 0
+  
+  # Check if realpath is available (cached on first call)
+  if [ -z "${_HAS_REALPATH+set}" ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      _HAS_REALPATH=1
+    else
+      _HAS_REALPATH=0
+    fi
+  fi
+  
+  # If realpath not available, we can't do the fallback check
+  [ "$_HAS_REALPATH" = "0" ] && return 1
+  
+  # Cache the realpath of dir2 (typically CWD) on first use
+  local cache_key="dir2"
+  if [ -z "${_REALPATH_CACHE_DIR2+set}" ] || [ "$_REALPATH_CACHE_DIR2" != "$dir2" ]; then
+    _REALPATH_CACHE_DIR2="$dir2"
+    _REALPATH_CACHE_VALUE2="$(realpath "$dir2" 2>/dev/null)" || {
+      _REALPATH_CACHE_VALUE2=""
+      return 1
+    }
+  fi
+  
+  # Get realpath of dir1
+  local rp1
+  rp1="$(realpath "$dir1" 2>/dev/null)" || return 1
+  
+  # Compare realpaths
+  [ "$rp1" = "$_REALPATH_CACHE_VALUE2" ]
+}
+
 preview_layout_spec() {
   case "$1" in
     bottom) echo "bottom,50%,wrap,border-top" ;;
@@ -846,7 +885,7 @@ stream_list() {
   if [ "$mode" = "this" ]; then
     while IFS='|' read -r id slug title directory agent model time_created time_updated msg_count first_prompt; do
       [ -z "$id" ] && continue
-      [ "$directory" != "$cwd" ] && continue
+      ! is_same_directory "$directory" "$cwd" && continue
       [ "${time_updated:-0}" -lt "$cutoff" ] 2>/dev/null && continue
       line_count=$((line_count + 1))
       [ "$line_count" -gt "$MAX_SESSIONS" ] && break
@@ -864,7 +903,7 @@ stream_list() {
       [ "$line_count" -gt "$MAX_SESSIONS" ] && break
       local row
       row="$(emit_row "$id" "$title" "$directory" "$agent" "$time_created" "$time_updated" "$msg_count" "$first_prompt" "$now" "$cwd" "" true)"
-      if [ "$directory" = "$cwd" ]; then
+      if is_same_directory "$directory" "$cwd"; then
         cwd_rows="${cwd_rows}${row}"$'\n'
       else
         other_rows="${other_rows}${row}"$'\n'
@@ -898,13 +937,13 @@ emit_row() {
   local msg_count="$7" first_prompt="$8"
   local now="$9" cwd="${10}" model="${11}" return_row_only="${12:-false}"
 
-  [ "$mode" = "this" ] && [ "$directory" != "$cwd" ] && { [ "$return_row_only" = "true" ] && echo "" || return 0; }
+  [ "$mode" = "this" ] && ! is_same_directory "$directory" "$cwd" && { [ "$return_row_only" = "true" ] && echo "" || return 0; }
   # Re-read mode since emit_row is called from stream_list context
   local mode="${OPENCODE_RESUME_MODE}"
   [ -f "${OPENCODE_RESUME_GROUP_TOGGLE:-/nonexistent}" ] && mode="both"
 
   local folder_seq="$color_green"
-  [ "$directory" = "$cwd" ] && folder_seq="$color_green_bold"
+  is_same_directory "$directory" "$cwd" && folder_seq="$color_green_bold"
 
   time_created="${time_created:-0}"
   time_updated="${time_updated:-0}"
@@ -1320,7 +1359,7 @@ resume_session() {
 
   local cwd
   cwd="$(pwd -P)"
-  if [ -n "$directory" ] && [ -d "$directory" ] && [ "$directory" != "$cwd" ]; then
+  if [ -n "$directory" ] && [ -d "$directory" ] && ! is_same_directory "$directory" "$cwd"; then
     printf '+ cd %s\n' "$directory" >&2
     cd "$directory" || return 1
   fi
