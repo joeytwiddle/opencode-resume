@@ -1172,19 +1172,29 @@ search_count_one() {
 
   local terms=("$@")
   local match_lines=0
-  local line text_lower
 
-  while IFS= read -r line; do
-    text_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
-    local all_found=true
-    for term in "${terms[@]}"; do
-      case "$text_lower" in
-        *"$term"*) ;;
-        *) all_found=false; break ;;
-      esac
-    done
-    [ "$all_found" = "true" ] && match_lines=$((match_lines + 1))
-  done < "$plain"
+  # Build a tab-separated list of terms for awk. We can't put literal tabs in
+  # terms, so this is safe.
+  local terms_joined
+  printf -v terms_joined '%s\t' "${terms[@]}"
+
+  # Count lines where ALL terms appear (case-insensitive). Using awk here
+  # instead of a bash while-read loop with per-line `tr` is ~1000x faster
+  # on large transcripts (avoids one fork+exec per line).
+  match_lines="$(awk -v terms="$terms_joined" '
+    BEGIN {
+      n = split(terms, term_arr, "\t")
+      IGNORECASE = 1
+    }
+    {
+      ok = 1
+      for (i = 1; i < n; i++) {
+        if (index($0, term_arr[i]) == 0) { ok = 0; break }
+      }
+      if (ok) count++
+    }
+    END { print count+0 }
+  ' "$plain")"
 
   [ "$match_lines" -gt 0 ] || return 0
   printf '%d\t%s\n' "$match_lines" "$sid"
@@ -1263,9 +1273,12 @@ search_preview() {
     sep="|"
   done
 
-  # Split cache into header (metadata) and body (messages)
+  # Split cache into header (metadata) and body (messages).
+  # The colored cache wraps the **Messages:** line with ANSI codes (e.g.
+  # `\033[2m**Messages:**\033[0m`), so we look for the literal marker
+  # anywhere on the line, then use that line number.
   local header_end
-  header_end="$(grep -n '^\*\*Messages:\*\*' "$colored" 2>/dev/null | head -1 | cut -d: -f1)"
+  header_end="$(grep -n -F '**Messages:**' "$colored" 2>/dev/null | head -1 | cut -d: -f1)"
   if [ -z "$header_end" ]; then
     GREP_COLOR='07' grep -i -C 2 --color=always -E "$pattern" "$colored" 2>/dev/null || true
     return 0
