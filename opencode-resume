@@ -181,6 +181,29 @@ init_colors() {
   color_timestamp="$(printf '\033[%sm' "${OPENCODE_RESUME_STYLE_TIMESTAMP:-2}")"
 }
 
+# Export the resolved ANSI codes for render_transcript.py so it can reuse the
+# same color scheme (including OPENCODE_RESUME_STYLE_* overrides) without
+# re-implementing init_colors. Called unconditionally — empty strings mean
+# "no color", which the Python renderer handles correctly.
+export_ansi_for_py() {
+  export OPENCODE_RESUME_ANSI_RESET="$color_reset"
+  export OPENCODE_RESUME_ANSI_BOLD="$color_bold"
+  export OPENCODE_RESUME_ANSI_DIM="$color_dim"
+  export OPENCODE_RESUME_ANSI_CYAN="$color_cyan"
+  export OPENCODE_RESUME_ANSI_GREEN="$color_green"
+  export OPENCODE_RESUME_ANSI_GREEN_BOLD="$color_green_bold"
+  export OPENCODE_RESUME_ANSI_BLUE_BOLD="$color_blue_bold"
+  export OPENCODE_RESUME_ANSI_YELLOW_BOLD="$color_yellow_bold"
+  export OPENCODE_RESUME_ANSI_RED="$color_red"
+  export OPENCODE_RESUME_ANSI_USER="$color_user"
+  export OPENCODE_RESUME_ANSI_ASSISTANT="$color_assistant"
+  export OPENCODE_RESUME_ANSI_TOOL_TAG="$color_tool_tag"
+  export OPENCODE_RESUME_ANSI_TOOL_USE="$color_tool_use"
+  export OPENCODE_RESUME_ANSI_TOOL_RESULT="$color_tool_result"
+  export OPENCODE_RESUME_ANSI_SKIPPED="$color_skipped"
+  export OPENCODE_RESUME_ANSI_TIMESTAMP="$color_timestamp"
+}
+
 our_styling() {
   case "$OPENCODE_RESUME_TRANSCRIPT_STYLING" in both|chat) ;; *) return 1 ;; esac
   local var key val
@@ -285,7 +308,23 @@ session_transcript_cache() {
     [ "$cache_mtime" -gt "$session_mtime" ] 2>/dev/null && { printf '%s' "$cache_file"; return 0; }
   fi
 
-  render_transcript_impl "$sid" "$short" "$full" "$timestamps" > "$cache_file" 2>/dev/null
+  # Cache miss — render with the Python renderer if available (much faster,
+  # ~30-100x on big sessions), falling back to the bash renderer on error
+  # or when python3 / render_transcript.py isn't installed.
+  local py="${OPENCODE_RESUME_RENDER_PY:-}"
+  if [ -n "$py" ] && [ -f "$py" ]; then
+    if ! python3 "$py" "$sid" --db "$db" \
+          $([ "$short" = "true" ] && echo --short) \
+          $([ "$full" = "true" ] && echo --full) \
+          $([ "$timestamps" = "true" ] && echo --timestamps) \
+          --first "${OPENCODE_RESUME_PREVIEW_FIRST:-15}" \
+          --last "${OPENCODE_RESUME_PREVIEW_LAST:-15}" \
+          > "$cache_file" 2>/dev/null; then
+      render_transcript_impl "$sid" "$short" "$full" "$timestamps" > "$cache_file" 2>/dev/null
+    fi
+  else
+    render_transcript_impl "$sid" "$short" "$full" "$timestamps" > "$cache_file" 2>/dev/null
+  fi
   printf '%s' "$cache_file"
 }
 
@@ -781,6 +820,23 @@ open_query() {
   local db="$1" query="$2"
   sqlite3 "$db" "$query" 2>/dev/null
 }
+
+# Resolve the absolute path of this script. Handles bare-name invocation via
+# PATH (where $0 is just "opencode-resume"), follows symlinks, and returns the
+# directory the script lives in. Used to locate the sibling render_transcript.py.
+self_path() {
+  local s="$0"
+  case "$s" in */*) ;; *) s="$(command -v "$s" 2>/dev/null || echo "./$s")" ;; esac
+  while [ -L "$s" ]; do
+    local link
+    link="$(readlink "$s" 2>/dev/null)" || break
+    case "$link" in /*) s="$link" ;; *) s="$(dirname "$s")/$link" ;; esac
+  done
+  cd "$(dirname "$s")" 2>/dev/null && pwd
+}
+
+# Check if python3 is available for the optional Python renderer.
+have_python() { command -v python3 >/dev/null 2>&1; }
 
 # Check if two directory paths refer to the same directory.
 # First tries exact string match (fast), then falls back to realpath comparison
@@ -1672,6 +1728,15 @@ case "$OPENCODE_RESUME_TRANSCRIPT_STYLING" in
   *) echo "opencode-resume: invalid OPENCODE_RESUME_TRANSCRIPT_STYLING '$OPENCODE_RESUME_TRANSCRIPT_STYLING' (both|chat|bat|none)" >&2; exit 2 ;;
 esac
 init_colors
+export_ansi_for_py
+
+# Resolve the Python renderer path once. Empty if missing — session_transcript_cache
+# falls back to the bash renderer in that case.
+if have_python; then
+  _self_dir="$(self_path)" && [ -f "$_self_dir/render_transcript.py" ] && \
+    export OPENCODE_RESUME_RENDER_PY="$_self_dir/render_transcript.py"
+  unset _self_dir
+fi
 
 case "$mode_action" in
   preview)      preview_session "${positional[0]:-}" ;;
