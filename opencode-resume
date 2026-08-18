@@ -937,8 +937,20 @@ emit_row() {
   short="$short/"
 
   local label
-  if [ -n "$title" ]; then
-    label="${color_yellow_bold}${title}${color_reset}"
+  # Strip the " (@X subagent)" suffix that OpenCode appends to subagent session titles
+  local clean_title="$title"
+  clean_title="${clean_title% (@explore subagent)}"
+  clean_title="${clean_title% (@general subagent)}"
+  clean_title="${clean_title% (@research subagent)}"
+  
+  # Prepend agent type for subagents
+  local agent_prefix=""
+  case "$agent" in
+    explore|general|research) agent_prefix="(subagent @${agent}) " ;;
+  esac
+  
+  if [ -n "$clean_title" ]; then
+    label="${color_yellow_bold}${agent_prefix}${clean_title}${color_reset}"
     if [ -n "$first_prompt" ]; then
       label="${label} ${first_prompt:0:200}"
     fi
