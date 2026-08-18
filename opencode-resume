@@ -222,11 +222,12 @@ cache_root() {
   printf '%s/opencode-resume' "$root"
 }
 
-# Session transcript cache — renders to $XDG_CACHE_HOME/opencode-resume/preview-cache/
-# with lazy invalidation (only re-renders when source data is newer).
+# Session transcript cache — renders to $XDG_CACHE_HOME/opencode-resume/transcripts/
+# with lazy invalidation (only re-renders when source data is newer). Preview,
+# search, and --transcript all share this one folder.
 session_transcript_cache() {
   local sid="$1" short="${2:-false}" full="${3:-false}" timestamps="${4:-false}"
-  local cache_dir="$(cache_root)/preview-cache"
+  local cache_dir="$(cache_root)/transcripts"
   mkdir -p "$cache_dir" 2>/dev/null || true
 
   local mode_tag="conv"
@@ -234,7 +235,7 @@ session_transcript_cache() {
   [ "$full" = "true" ] && mode_tag="full"
   [ "$timestamps" = "true" ] && mode_tag="${mode_tag}_ts"
 
-  local cache_file="$cache_dir/${sid}_${mode_tag}.md"
+  local cache_file="$cache_dir/${sid}_${mode_tag}.color.txt"
   local db
   db="$(get_db_path)" || return 1
 
@@ -576,6 +577,14 @@ transcript_mode() {
       echo "No session found matching: $sid" >&2
       return 1
     fi
+  fi
+
+  local cache_file
+  cache_file="$(session_transcript_cache "$sid" "$short_mode" "$full_mode" "$ts_mode")" || true
+  if [ -n "$cache_file" ] && [ -f "$cache_file" ] \
+     && [ "$first_n" = "${OPENCODE_RESUME_PREVIEW_FIRST:-15}" ] && [ "$last_n" = "${OPENCODE_RESUME_PREVIEW_LAST:-15}" ]; then
+    cat "$cache_file" | render
+    return 0
   fi
 
   render_transcript_impl "$sid" "$short_mode" "$full_mode" "$ts_mode" "$first_n" "$last_n" | render
@@ -1081,24 +1090,20 @@ preview_session() {
 # ──────────────────────────────────────────────
 
 clear_cache() {
-  local cache_dir
   local root
   root="$(cache_root 2>/dev/null)" || root="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-resume"
-  cache_dir="$root/search-cache"
-  local preview_cache="$root/preview-cache"
+  local cache_dir="$root/transcripts"
   local count=0
-  for d in "$cache_dir" "$preview_cache"; do
-    if [ -d "$d" ]; then
-      local n=0
-      find "$d" -type f 2>/dev/null | while IFS= read -r f; do
-        n=$((n + 1))
-      done
-      rm -rf "$d" 2>/dev/null
-      count=$((count + 1))
-    fi
-  done
-  mkdir -p "$cache_dir" "$preview_cache" 2>/dev/null
-  printf 'Cleared search and transcript caches.\n' >&2
+  if [ -d "$cache_dir" ]; then
+    local n=0
+    find "$cache_dir" -type f 2>/dev/null | while IFS= read -r f; do
+      n=$((n + 1))
+    done
+    rm -rf "$cache_dir" 2>/dev/null
+    count=$((count + 1))
+  fi
+  mkdir -p "$cache_dir" 2>/dev/null
+  printf 'Cleared transcript caches.\n' >&2
 }
 
 # Split a search query into terms, one per line. Whitespace-separated, but
@@ -1117,22 +1122,16 @@ tokenize_query() {
     }'
 }
 
-search_cache_dir() {
-  local cache_dir="$(cache_root)/search-cache"
-  mkdir -p "$cache_dir" 2>/dev/null || true
-  printf '%s' "$cache_dir"
-}
-
+# Search cache reuses the shared transcripts/ folder: the colored file comes
+# from session_transcript_cache() (so preview, search display, and --transcript
+# all share one render), and the plain file is derived from it via sed.
 search_session_cache() {
   local sid="$1" full_mode="${2:-false}"
-  local cache_dir
-  cache_dir="$(search_cache_dir)"
 
-  local mode_tag="conv"
-  [ "$full_mode" = "true" ] && mode_tag="full"
+  local colored
+  colored="$(session_transcript_cache "$sid" false "$full_mode")" || return 1
 
-  local plain="$cache_dir/transcript-${sid}_${mode_tag}.txt"
-  local colored="$cache_dir/transcript-${sid}_${mode_tag}.color.txt"
+  local plain="${colored%.color.txt}.txt"
 
   local db
   db="$(get_db_path)" || return 1
@@ -1140,14 +1139,13 @@ search_session_cache() {
   local session_updated
   session_updated="$(open_query "$db" "SELECT COALESCE(time_updated, 0) FROM session WHERE id = '$sid'")"
 
-  if [ -f "$plain" ] && [ -f "$colored" ] && [ -n "$session_updated" ]; then
+  if [ -f "$plain" ] && [ -n "$session_updated" ]; then
     local cache_mtime session_mtime
     cache_mtime="$(stat -c %Y "$plain" 2>/dev/null || echo 0)"
     session_mtime=$(( session_updated / 1000 ))
     [ "$cache_mtime" -gt "$session_mtime" ] 2>/dev/null && { printf '%s\t%s' "$plain" "$colored"; return 0; }
   fi
 
-  render_transcript_impl "$sid" false "$full_mode" false > "$colored" 2>/dev/null
   sed 's/\x1b\[[0-9;]*m//g' "$colored" > "$plain" 2>/dev/null
 
   printf '%s\t%s' "$plain" "$colored"
