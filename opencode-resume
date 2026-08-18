@@ -197,8 +197,15 @@ bat_styling() {
 }
 
 render() {
-  if bat_styling && command -v bat >/dev/null 2>&1; then
-    bat -l markdown --style=plain --color=always
+  # Pager: less -RX if available (preserves ANSI, pages on TTY, passes through
+  # on a pipe), else cat. bat uses --paging=never so it never tries to page
+  # itself — paging is owned here, matching claude-resume's pattern.
+  local pager='cat'
+  command -v less >/dev/null 2>&1 && pager='less -RX'
+  if want_color && bat_styling && command -v bat >/dev/null 2>&1; then
+    bat --paging=never -l markdown --style=plain --color=always | $pager
+  elif want_color; then
+    $pager
   else
     cat
   fi
@@ -250,6 +257,12 @@ cache_root() {
 # search, and --transcript all share this one folder.
 session_transcript_cache() {
   local sid="$1" short="${2:-false}" full="${3:-false}" timestamps="${4:-false}"
+  # Normalise boolean flags — top-level --full exports OPENCODE_RESUME_TRANSCRIPT_FULL=1
+  # (string "1"), while preview_session passes bash booleans ("true"/"false").
+  # Match render_transcript_impl's normalisation so mode_tag reflects the caller's intent.
+  [ "$short" = "1" ] && short="true"
+  [ "$full" = "1" ] && full="true"
+  [ "$timestamps" = "1" ] && timestamps="true"
   local cache_dir="$(cache_root)/transcripts"
   mkdir -p "$cache_dir" 2>/dev/null || true
 
@@ -332,40 +345,32 @@ render_transcript_impl() {
   # ── Query parts with newlines escaped in SQL ──
   # sqlite3 CLI converts control chars (\x00-\x1f) to caret notation
   # (e.g., \x1e becomes ^^), so use a visible text placeholder instead.
+  # Streamed via process substitution to avoid holding 9994 rows in a bash
+  # variable; the loop still populates the parent's arrays.
+  # Tool input/output are only rendered in full mode, so we skip the json
+  # extraction (which can be large) in short/conversation mode.
   local RS=$'\x1f'
   local NL_PLACEHOLDER='_NL_'
   local field_sep=$'\x1f'
-  local parts_data
-  parts_data="$(sqlite3 -separator "$RS" "$db" "
-    SELECT m.id,
-           json_extract(m.data, '\$.role'),
-           COALESCE(json_extract(m.data, '\$.time.created'), '0'),
-           COALESCE(json_extract(m.data, '\$.agent'), ''),
-           COALESCE(json_extract(m.data, '\$.modelID'), ''),
-            json_extract(p.data, '\$.type'),
-            REPLACE(COALESCE(json_extract(p.data, '\$.text'), ''), CHAR(10), '$NL_PLACEHOLDER'),
-            COALESCE(json_extract(p.data, '\$.tool'), ''),
-            COALESCE(json_extract(p.data, '\$.state.status'), ''),
-            COALESCE(json_extract(p.data, '\$.callID'), ''),
-            REPLACE(COALESCE(json_extract(p.data, '\$.state.input'), ''), CHAR(10), '$NL_PLACEHOLDER'),
-            REPLACE(COALESCE(json_extract(p.data, '\$.state.output'), ''), CHAR(10), '$NL_PLACEHOLDER')
-     FROM message m JOIN part p ON p.message_id = m.id
-    WHERE m.session_id = '$sid'
-    ORDER BY m.time_created, p.time_created
-  " 2>/dev/null)"
-
-  [ -z "$parts_data" ] && { printf '_(no messages)_\n'; return 0; }
+  local input_expr="''"
+  local output_expr="''"
+  if [ "$full_mode" = "true" ]; then
+    input_expr="REPLACE(COALESCE(json_extract(p.data, '\$.state.input'), ''), CHAR(10), '$NL_PLACEHOLDER')"
+    output_expr="REPLACE(COALESCE(json_extract(p.data, '\$.state.output'), ''), CHAR(10), '$NL_PLACEHOLDER')"
+  fi
 
   # Assemble into messages
   local msg_ids=() msg_roles=() msg_times=() msg_agents=() msg_models=()
   local msg_texts=() tool_records=() msg_tool_start=() msg_tool_end=()
   local cur_mid="" cur_role="" cur_time="" cur_agent="" cur_model="" cur_text=""
   local cur_tool_start=0
+  local saw_parts=0
 
   local old_ifs="$IFS"
   IFS="$RS"
   while read -r mid role mtime agent model ptype ptext ptool pstatus pcid pinput poutput; do
     [ -z "$mid" ] && continue
+    saw_parts=1
 
     if [ "$mid" != "$cur_mid" ] && [ -n "$cur_mid" ]; then
       msg_ids+=("$cur_mid")
@@ -399,8 +404,29 @@ render_transcript_impl() {
         tool_records+=("${ptool}${field_sep}${pstatus}${field_sep}${pinput}${field_sep}${poutput}${field_sep}${pcid}")
         ;;
     esac
-  done <<< "$parts_data"
+  done < <(sqlite3 -separator "$RS" "$db" "
+    SELECT m.id,
+           json_extract(m.data, '\$.role'),
+           COALESCE(json_extract(m.data, '\$.time.created'), '0'),
+           COALESCE(json_extract(m.data, '\$.agent'), ''),
+           COALESCE(json_extract(m.data, '\$.modelID'), ''),
+            json_extract(p.data, '\$.type'),
+            REPLACE(COALESCE(json_extract(p.data, '\$.text'), ''), CHAR(10), '$NL_PLACEHOLDER'),
+            COALESCE(json_extract(p.data, '\$.tool'), ''),
+            COALESCE(json_extract(p.data, '\$.state.status'), ''),
+            COALESCE(json_extract(p.data, '\$.callID'), ''),
+            $input_expr,
+            $output_expr
+     FROM message m JOIN part p ON p.message_id = m.id
+    WHERE m.session_id = '$sid'
+    ORDER BY m.time_created, p.time_created
+  " 2>/dev/null)
   IFS="$old_ifs"
+
+  if [ "$saw_parts" -eq 0 ]; then
+    printf '_(no messages)_\n'
+    return 0
+  fi
 
   # Save last message
   if [ -n "$cur_mid" ]; then
@@ -488,7 +514,8 @@ render_transcript_impl() {
     printf '%s %s\n' "$icon" "$label"
 
     if [ -n "$mtext" ]; then
-      printf '%s\n' "$(printf '%s' "$mtext" | sed 's/_NL_/\n/g')" | sed 's/^/  /'
+      mtext="${mtext//_NL_/$'\n'}"
+      while IFS= read -r _line; do printf '  %s\n' "$_line"; done <<< "$mtext"
     fi
 
     # Show tool parts if full_mode
@@ -510,8 +537,8 @@ render_transcript_impl() {
           local tinput="${tool_fields[2]}"
           local toutput="${tool_fields[3]}"
           local tcid="${tool_fields[4]}"
-          [[ "$tinput" == *"$NL_PLACEHOLDER"* ]] && tinput="$(printf '%s' "$tinput" | sed 's/_NL_/\n/g')"
-          [[ "$toutput" == *"$NL_PLACEHOLDER"* ]] && toutput="$(printf '%s' "$toutput" | sed 's/_NL_/\n/g')"
+          tinput="${tinput//_NL_/$'\n'}"
+          toutput="${toutput//_NL_/$'\n'}"
           local status_color="$color_tool_tag"
           [ "$tstatus" = "error" ] && status_color="$color_red"
           printf '  %s∘ %s%s [%s]%s\n' "$color_dim" "$tname" "$color_reset" "$status_color$tstatus$color_reset" "$color_reset"
@@ -1633,7 +1660,12 @@ if [ "$OPENCODE_RESUME_MODE" = "both" ]; then
   export OPENCODE_RESUME_MODE="recent"
 fi
 
-export FORCE_COLOR="${FORCE_COLOR:-1}"
+# Auto-enable colour only when stdout is a TTY and the user hasn't expressed a
+# preference via FORCE_COLOR. Picker subprocesses force FORCE_COLOR=1 in
+# init_picker_state so fzf previews stay coloured even when piped.
+if [ -z "${FORCE_COLOR:-}" ] && [ -t 1 ]; then
+  export FORCE_COLOR=1
+fi
 want_color() { [ -n "${FORCE_COLOR:-}" ] && [ "$FORCE_COLOR" != "0" ]; }
 case "$OPENCODE_RESUME_TRANSCRIPT_STYLING" in
   both|chat|bat|none) ;;
