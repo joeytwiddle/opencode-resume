@@ -214,12 +214,19 @@ preview_mode_spec() {
   esac
 }
 
-# Session transcript cache — renders to $TMPDIR/opencode-resume/preview-cache/
+# Root of the persistent cache directory. Uses XDG_CACHE_HOME so caches
+# survive reboots (unlike $TMPDIR / $XDG_RUNTIME_DIR, which are typically
+# tmpfs and cleared on logout).
+cache_root() {
+  local root="${XDG_CACHE_HOME:-$HOME/.cache}"
+  printf '%s/opencode-resume' "$root"
+}
+
+# Session transcript cache — renders to $XDG_CACHE_HOME/opencode-resume/preview-cache/
 # with lazy invalidation (only re-renders when source data is newer).
 session_transcript_cache() {
   local sid="$1" short="${2:-false}" full="${3:-false}" timestamps="${4:-false}"
-  local tmpdir="${TMPDIR:-/tmp}"
-  local cache_dir="$tmpdir/opencode-resume/preview-cache"
+  local cache_dir="$(cache_root)/preview-cache"
   mkdir -p "$cache_dir" 2>/dev/null || true
 
   local mode_tag="conv"
@@ -1075,8 +1082,10 @@ preview_session() {
 
 clear_cache() {
   local cache_dir
-  cache_dir="$(search_cache_dir 2>/dev/null || echo "${TMPDIR:-/tmp}/opencode-resume/search-cache")"
-  local preview_cache="${TMPDIR:-/tmp}/opencode-resume/preview-cache"
+  local root
+  root="$(cache_root 2>/dev/null)" || root="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-resume"
+  cache_dir="$root/search-cache"
+  local preview_cache="$root/preview-cache"
   local count=0
   for d in "$cache_dir" "$preview_cache"; do
     if [ -d "$d" ]; then
@@ -1109,8 +1118,7 @@ tokenize_query() {
 }
 
 search_cache_dir() {
-  local tmpdir="${TMPDIR:-/tmp}"
-  local cache_dir="$tmpdir/opencode-resume/search-cache"
+  local cache_dir="$(cache_root)/search-cache"
   mkdir -p "$cache_dir" 2>/dev/null || true
   printf '%s' "$cache_dir"
 }
