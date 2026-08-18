@@ -1318,7 +1318,7 @@ main_search() {
           --preview 'opencode-resume --search-preview {1} {q}' \
           --preview-window 'right,50%,wrap,border-left' \
           --bind 'focus:transform:[ -z {1} ] && echo "change-preview-window:hidden" || echo "change-preview-window:$(opencode-resume --print-preview-layout)"' \
-          --bind 'start:reload:opencode-resume --search-list' \
+          --bind 'start:reload:opencode-resume --search-list {q}' \
           --bind "change:reload:sleep \"\${OPENCODE_RESUME_SEARCH_DEBOUNCE:-0.25}\"; opencode-resume --search-list {q}" \
           --bind 'ctrl-s:abort' \
           --bind 'ctrl-f:execute-silent(opencode-resume --cycle-preview-mode)+reload(opencode-resume --search-list {q})+refresh-preview' \
