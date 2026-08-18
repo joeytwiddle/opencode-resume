@@ -979,11 +979,10 @@ emit_row() {
   local time_created="$5" time_updated="$6"
   local msg_count="$7" first_prompt="$8"
   local now="$9" cwd="${10}" model="${11}" return_row_only="${12:-false}"
-
-  [ "$mode" = "this" ] && ! is_same_directory "$directory" "$cwd" && { [ "$return_row_only" = "true" ] && echo "" || return 0; }
-  # Re-read mode since emit_row is called from stream_list context
   local mode="${OPENCODE_RESUME_MODE}"
   [ -f "${OPENCODE_RESUME_GROUP_TOGGLE:-/nonexistent}" ] && mode="both"
+
+  [ "$mode" = "this" ] && ! is_same_directory "$directory" "$cwd" && { [ "$return_row_only" = "true" ] && echo "" || return 0; }
 
   local folder_seq="$color_green"
   is_same_directory "$directory" "$cwd" && folder_seq="$color_green_bold"
@@ -1049,12 +1048,17 @@ emit_row() {
   local prefix=""
   [ -n "${OPENCODE_RESUME_LIST_WITH_SID:-}" ] && prefix="$id"$'\t'
 
+  local count_col=""
+  if [ -n "${OPENCODE_RESUME_SEARCH_COUNT:-}" ]; then
+    count_col="$(printf '%s%4d×%s  ' "$color_yellow_bold" "${OPENCODE_RESUME_SEARCH_COUNT:-0}" "$color_reset")"
+  fi
+
   local dsp_msg
   [ "$msg_count" -gt 0 ] && dsp_msg="$(printf '%4d msgs' "$msg_count")" || dsp_msg="  0 msgs"
 
   local row
-  row="$(printf '%s%s%-15s%s  %s%-24s%s  %s%s%s  %s' \
-    "$prefix" "$color_cyan" "$age" "$color_reset" \
+  row="$(printf '%s%s%s%-15s%s  %s%-24s%s  %s%s%s  %s' \
+    "$prefix" "$count_col" "$color_cyan" "$age" "$color_reset" \
     "$folder_seq" "$short" "$color_reset" \
     "$color_blue_bold" "$dsp_msg" "$color_reset" "$label")"
 
@@ -1250,12 +1254,27 @@ search_list() {
 
   sort -t$'\t' -k1,1 -rn "$results_file" 2>/dev/null | while IFS=$'\t' read -r count sid; do
     [ -z "$sid" ] && continue
-    local session_info slug title
-    session_info="$(open_query "$db" "SELECT COALESCE(slug, ''), COALESCE(title, '') FROM session WHERE id = '$sid'")"
-    IFS='|' read -r slug title <<< "$session_info"
+    local session_info slug title directory agent model time_created time_updated msg_count first_prompt
+    session_info="$(open_query "$db" "
+      SELECT COALESCE(s.slug, ''), COALESCE(s.title, ''), COALESCE(s.directory, ''), COALESCE(s.agent, ''),
+             COALESCE(s.model, ''), COALESCE(s.time_created, 0), COALESCE(s.time_updated, 0),
+             (SELECT COUNT(*) FROM message WHERE session_id = s.id),
+             COALESCE((SELECT REPLACE(REPLACE(CAST(json_extract(p.data, '$.text') AS TEXT), CHAR(9), ' '), CHAR(10), ' ')
+                       FROM message sm JOIN part p ON p.message_id = sm.id
+                       WHERE sm.session_id = s.id AND json_extract(sm.data, '$.role') = 'user'
+                         AND json_extract(p.data, '$.type') = 'text'
+                         AND json_extract(p.data, '$.text') IS NOT NULL
+                         AND CAST(json_extract(p.data, '$.text') AS TEXT) != ''
+                       ORDER BY sm.time_created, p.time_created LIMIT 1), '')
+      FROM session s WHERE s.id = '$sid'
+    ")"
+    IFS='|' read -r slug title directory agent model time_created time_updated msg_count first_prompt <<< "$session_info"
     [ -z "$title" ] && title="Untitled"
     [ "$title" = "$slug" ] && title="Untitled"
-    printf '%s\t%s%4d×%s  \t%s\n' "$sid" "$color_yellow_bold" "$count" "$color_reset" "$title"
+    OPENCODE_RESUME_SEARCH_COUNT="$count" \
+    OPENCODE_RESUME_LIST_WITH_SID=1 \
+    OPENCODE_RESUME_MODE=recent \
+      emit_row "$sid" "$title" "$directory" "$agent" "$time_created" "$time_updated" "$msg_count" "$first_prompt" "$(date +%s)" "$(pwd -P)" "$model" false
   done
 
   rm -f "$results_file"
